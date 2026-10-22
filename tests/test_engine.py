@@ -136,5 +136,67 @@ class TestMetrics(unittest.TestCase):
         self.assertAlmostEqual(s["payoff_ratio"], 2.5)
 
 
+class TestDividendAdjust(unittest.TestCase):
+    """除息日：前一日實際收盤 110、每股配息 5，factor 由 105/110 升到 1。"""
+    F = 105 / 110
+    ROWS = BASE[:4] + [(104, 106, 103, 105), (104, 104, 103.5, 104)]
+
+    def df(self):
+        d = bars(self.ROWS)
+        d["factor"] = [self.F] * 4 + [1.0, 1.0]
+        return d
+
+    def test_ex_dividend_gap_does_not_trigger_stop_and_credits_cash(self):
+        res = engine.run(self.df(), manual_signals(6, 1, 5.0), CAP)
+        t = res.trades.iloc[0]
+        self.assertEqual(t.exit_reason, "forced_exit")  # 還原後停損 100，最低 103 未觸及
+        n = 9789
+        self.assertAlmostEqual(t.dividends, n * 5)
+        expected = n * 104 - math.floor(n * 104 * 0.001425) - math.floor(n * 104 * 0.003) + n * 5 \
+            - (n * 102 + math.floor(n * 102 * 0.001425))
+        self.assertAlmostEqual(t.pnl, expected)
+
+    def test_without_factor_same_gap_triggers_stop(self):
+        d = self.df().drop(columns="factor")
+        t = engine.run(d, manual_signals(6, 1, 5.0), CAP).trades.iloc[0]
+        self.assertEqual((t.exit_reason, t.exit_price), ("stop_gap", 104))  # 開盤 104 已低於未還原停損 105
+
+    def test_buy_and_hold_credits_dividend(self):
+        bh = engine.buy_and_hold(self.df(), CAP)
+        n = CostModel().max_shares(CAP, 100)
+        self.assertAlmostEqual(bh.trades.iloc[0].dividends, n * 5)
+
+    def test_future_dividend_rescaling_does_not_change_past(self):
+        rng = np.random.default_rng(2)
+        close = 100 + np.cumsum(rng.normal(0, 1, 250))
+        rows = [(c, c + 1, c - 1, c) for c in close]
+        a = bars(rows)
+        a["factor"] = 1.0
+        b = a.copy()
+        k = 150
+        b.loc[: k - 1, "factor"] = 0.8  # 第 k 日之後才發生的配息，回溯縮放 k 日以前資料
+        ra = engine.run(a, strategy.ma_cross_atr_trail(strategy.adjusted(a)), CAP)
+        rb = engine.run(b, strategy.ma_cross_atr_trail(strategy.adjusted(b)), CAP)
+        cols = ["cash", "shares", "equity"]
+        pd.testing.assert_frame_equal(ra.equity.loc[: k - 1, cols], rb.equity.loc[: k - 1, cols])
+
+
+class TestLoadWithAdj(unittest.TestCase):
+    def test_factor_and_date_mismatch(self):
+        import tempfile, os
+        from backtest.data import load_with_adj
+        with tempfile.TemporaryDirectory() as d:
+            raw = bars([(10, 11, 9, 10), (10, 11, 9, 10), (10, 11, 9, 10)])
+            adj = raw.copy()
+            adj[["open", "high", "low", "close"]] *= 0.5
+            raw.to_csv(os.path.join(d, "r.csv"), index=False)
+            adj.to_csv(os.path.join(d, "a.csv"), index=False)
+            out = load_with_adj(os.path.join(d, "r.csv"), os.path.join(d, "a.csv"))
+            self.assertTrue((out["factor"] == 0.5).all())
+            adj.iloc[:2].to_csv(os.path.join(d, "a.csv"), index=False)
+            with self.assertRaises(ValueError):
+                load_with_adj(os.path.join(d, "r.csv"), os.path.join(d, "a.csv"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,3 +22,13 @@ def ma_cross_atr_trail(df: pd.DataFrame, ma_n: int = 20, atr_n: int = 14, atr_k:
     above = df["close"] > ma
     entry = above & ~above.shift(1, fill_value=True) & ma.notna() & ma.shift(1).notna()
     return pd.DataFrame({"entry": entry.fillna(False), "trail_dist": atr(df, atr_n) * atr_k}, index=df.index)
+
+
+def adjusted(df: pd.DataFrame) -> pd.DataFrame:
+    """把開高低收換算成還原價（乘上 factor）；沒有 factor 欄時原樣回傳。策略應在此結果上計算。"""
+    if "factor" not in df:
+        return df
+    out = df.copy()
+    for c in ("open", "high", "low", "close"):
+        out[c] = df[c] * df["factor"]
+    return out
