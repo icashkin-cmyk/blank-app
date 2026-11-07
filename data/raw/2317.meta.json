@@ -1,0 +1,138 @@
+{
+  "source": "FinMind TaiwanStockPrice + TaiwanStockDividendResult + TaiwanStockCapitalReductionReferencePrice",
+  "api": "https://api.finmindtrade.com/api/v4/data",
+  "stock_id": "2317",
+  "fetched_at": "2026-11-07T03:27:40+00:00",
+  "requested_range": [
+    "2015-01-01",
+    "2026-11-06"
+  ],
+  "actual_range": [
+    "2015-01-05",
+    "2026-11-06"
+  ],
+  "rows": 2879,
+  "columns": [
+    "date",
+    "stock_id",
+    "Trading_Volume",
+    "Trading_money",
+    "open",
+    "max",
+    "min",
+    "close",
+    "spread",
+    "Trading_turnover"
+  ],
+  "adjustment": "factor 由除權息日 after_price / before_price 回溯連乘",
+  "ex_rights_events": [
+    {
+      "date": "2015-09-03",
+      "kind": "dividend",
+      "before_price": 90.6,
+      "after_price": 82.66,
+      "prev_close": 90.6,
+      "status": "OK"
+    },
+    {
+      "date": "2016-09-02",
+      "kind": "dividend",
+      "before_price": 87.4,
+      "after_price": 75.81,
+      "prev_close": 87.4,
+      "status": "OK"
+    },
+    {
+      "date": "2017-07-13",
+      "kind": "dividend",
+      "before_price": 118.5,
+      "after_price": 114.0,
+      "prev_close": 118.5,
+      "status": "OK"
+    },
+    {
+      "date": "2018-07-25",
+      "kind": "dividend",
+      "before_price": 85.2,
+      "after_price": 83.2,
+      "prev_close": 85.2,
+      "status": "OK"
+    },
+    {
+      "date": "2019-07-25",
+      "kind": "dividend",
+      "before_price": 81.3,
+      "after_price": 77.3,
+      "prev_close": 81.3,
+      "status": "OK"
+    },
+    {
+      "date": "2020-07-23",
+      "kind": "dividend",
+      "before_price": 85.9,
+      "after_price": 81.7,
+      "prev_close": 85.9,
+      "status": "OK"
+    },
+    {
+      "date": "2021-07-22",
+      "kind": "dividend",
+      "before_price": 112.5,
+      "after_price": 108.5,
+      "prev_close": 112.5,
+      "status": "OK"
+    },
+    {
+      "date": "2022-07-04",
+      "kind": "dividend",
+      "before_price": 106.0,
+      "after_price": 100.8,
+      "prev_close": 106.0,
+      "status": "OK"
+    },
+    {
+      "date": "2023-07-04",
+      "kind": "dividend",
+      "before_price": 115.0,
+      "after_price": 109.7,
+      "prev_close": 115.0,
+      "status": "OK"
+    },
+    {
+      "date": "2024-07-02",
+      "kind": "dividend",
+      "before_price": 216.0,
+      "after_price": 210.6,
+      "prev_close": 216.0,
+      "status": "OK"
+    },
+    {
+      "date": "2025-07-02",
+      "kind": "dividend",
+      "before_price": 165.5,
+      "after_price": 159.7,
+      "prev_close": 165.5,
+      "status": "OK"
+    },
+    {
+      "date": "2026-07-02",
+      "kind": "dividend",
+      "before_price": 248.0,
+      "after_price": 240.82,
+      "prev_close": 248.0,
+      "status": "OK"
+    },
+    {
+      "date": "2018-10-26",
+      "kind": "capital_reduction",
+      "before_price": 68.1,
+      "after_price": 82.62,
+      "prev_close": 68.1,
+      "status": "OK"
+    }
+  ],
+  "sha256": {
+    "2317.csv": "f6d4444ca10ca6da6dc3dfb433329903ad08850d656179c9fc6aeb6046a5faed",
+    "2317_adj.csv": "e2f41fb39cab76824e0460735f04297539d7a3bbc05c3373fef585483f667e0b"
+  }
+}
