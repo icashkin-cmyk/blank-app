@@ -4,8 +4,9 @@
     export FINMIND_TOKEN=你的token   # 可省略，省略時額度較低
     python3 tools/fetch_finmind.py 2330 2454 2317 --start 2015-01-01 --end 2026-10-19
 
-每檔抓 TaiwanStockPrice（實際價）與 TaiwanStockDividendResult（除權息結果），
-以除權息日 after_price / before_price 為調整比回溯連乘成 factor，寫出 <代號>_adj.csv。
+每檔抓 TaiwanStockPrice（實際價）、TaiwanStockDividendResult（除權息結果）與
+TaiwanStockCapitalReductionReferencePrice（減資恢復買賣參考價），
+以事件日 after_price / before_price 為調整比回溯連乘成 factor，寫出 <代號>_adj.csv。
 （TaiwanStockPriceAdj 還原價資料集免費帳號不開放，2026-11-04 實測回 400。）
 
 已存在的檔案不會重抓，避免浪費額度；要重抓請先手動移走舊檔。
@@ -59,7 +60,7 @@ def build_adj(rows, events):
             checks.append({"date": e["date"], "status": "SKIPPED_NOT_IN_PRICE"})
             continue
         ratio[i] = e["after_price"] / e["before_price"]
-        checks.append({"date": e["date"], "before_price": e["before_price"], "after_price": e["after_price"],
+        checks.append({"date": e["date"], "kind": e.get("kind", "dividend"), "before_price": e["before_price"], "after_price": e["after_price"],
                        "prev_close": rows[i - 1]["close"],
                        "status": "OK" if abs(rows[i - 1]["close"] - e["before_price"]) < 1e-6 else "PREV_CLOSE_MISMATCH"})
     f = [1.0] * len(rows)
@@ -100,11 +101,15 @@ def main():
             print(f"{sid}: 無資料", file=sys.stderr)
             continue
         events = cached_fetch(cache, "TaiwanStockDividendResult", sid, a.start, a.end, token)
+        reductions = cached_fetch(cache, "TaiwanStockCapitalReductionReferencePrice", sid, a.start, a.end, token)
+        events = events + [{"date": r["date"], "before_price": r["ClosingPriceonTheLastTradingDay"],
+                            "after_price": r["PostReductionReferencePrice"], "kind": "capital_reduction"}
+                           for r in reductions]
         adj, checks = build_adj(rows, events)
         adj_path = out / f"{sid}_adj.csv"
         write_rows(path, rows)
         write_rows(adj_path, adj)
-        meta = {"source": "FinMind TaiwanStockPrice + TaiwanStockDividendResult", "api": API, "stock_id": sid,
+        meta = {"source": "FinMind TaiwanStockPrice + TaiwanStockDividendResult + TaiwanStockCapitalReductionReferencePrice", "api": API, "stock_id": sid,
                 "fetched_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                 "requested_range": [a.start, a.end],
                 "actual_range": [rows[0]["date"], rows[-1]["date"]],

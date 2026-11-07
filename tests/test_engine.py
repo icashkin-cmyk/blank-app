@@ -181,6 +181,19 @@ class TestDividendAdjust(unittest.TestCase):
         pd.testing.assert_frame_equal(ra.equity.loc[: k - 1, cols], rb.equity.loc[: k - 1, cols])
 
 
+class TestCapitalReduction(unittest.TestCase):
+    def test_reduction_scales_shares_value_neutral(self):
+        rows = BASE[:4] + [(137.5, 140, 135, 137.5), (137.5, 140, 135, 137.5)]  # 減資後參考價 = 110 × 1.25
+        d = bars(rows)
+        d["factor"] = [1.25] * 4 + [1.0, 1.0]
+        res = engine.run(d, manual_signals(6, 1, 5.0), CAP)
+        eq = res.equity.equity
+        self.assertAlmostEqual(eq.iloc[4], eq.iloc[3])  # 參考價成交不產生假損益
+        self.assertAlmostEqual(res.equity.shares.iloc[4], 9789 / 1.25)
+        bh = engine.buy_and_hold(d, CAP)
+        self.assertAlmostEqual(bh.equity.equity.iloc[4], bh.equity.equity.iloc[3])
+
+
 class TestLoadWithAdj(unittest.TestCase):
     def test_factor_and_date_mismatch(self):
         import tempfile, os

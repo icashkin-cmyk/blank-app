@@ -22,6 +22,8 @@ def main():
     ap.add_argument("--ma", type=int, default=20)
     ap.add_argument("--atr", type=int, default=14)
     ap.add_argument("--k", type=float, default=3.0)
+    ap.add_argument("--start", help="回測起日（含）；訊號仍用之前的歷史暖機，不引入前視")
+    ap.add_argument("--end", help="回測迄日（含）")
     a = ap.parse_args()
 
     out = Path(a.out)
@@ -36,6 +38,8 @@ def main():
         df = load_with_adj(path, str(adj_path)) if adj_path.exists() else load_csv(path)
         price_note = "含除權息還原" if "factor" in df else "未還原（無 _adj.csv），除權息跳空可能誤觸停損"
         sig = strategy.ma_cross_atr_trail(strategy.adjusted(df), a.ma, a.atr, a.k)
+        keep = df["date"].between(a.start or df["date"].min(), a.end or df["date"].max())
+        df, sig = df[keep].reset_index(drop=True), sig[keep].reset_index(drop=True)
         res = engine.run(df, sig, a.capital, costs)
         bh = engine.buy_and_hold(df, a.capital, costs)
         res.trades.to_csv(out / f"trades_{name}.csv", index=False)

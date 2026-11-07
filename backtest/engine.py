@@ -15,6 +15,8 @@
   實際停損價 = 還原停損價 / factor[當日]。除權息日的價格跳空因此不會誤觸停損。
 - 除息日持有者入帳每股 前一日實際收盤 × (1 − factor[前一日] / factor[當日])。
   配股也以等值現金入帳（簡化）；股利所得稅與二代健保補充保費未計。
+- 減資等使參考價高於前收的事件（factor 下降），持股按 factor[當日] / factor[前一日] 等值縮減
+  （可為小數股；退還股款視同按參考價再投入，簡化）。
 - 回溯還原會把較早資料整體乘上常數，訊號與停損對整體縮放不變，故不引入前視。
 """
 from dataclasses import dataclass, field
@@ -59,11 +61,14 @@ def run(df: pd.DataFrame, signals: pd.DataFrame, capital: float = 1_000_000,
         prev_close = df.at[i - 1, "close"] if i > 0 else None
         f = factor[i]
 
-        # 0. 除權息日：持有者入帳股利
+        # 0. 除權息、減資日：持有者入帳股利或等值縮減股數
         if shares > 0 and i > 0 and f > factor[i - 1] * (1 + 1e-9):
             div = shares * prev_close * (1 - factor[i - 1] / f)
             cash += div
             entry["dividends"] += div
+        elif shares > 0 and i > 0 and f < factor[i - 1] * (1 - 1e-9):
+            shares = shares * f / factor[i - 1]
+            entry["shares_after_events"] = shares
 
         # 1. 開盤：處理前一日留下的買單
         if pending_buy and shares == 0:
@@ -98,7 +103,7 @@ def run(df: pd.DataFrame, signals: pd.DataFrame, capital: float = 1_000_000,
             amt = shares * exit_price
             fee, tax = costs.fee(amt), costs.tax(amt)
             cash += amt - fee - tax
-            trades.append(_trade(entry, row.date, exit_price, exit_reason, fee, tax))
+            trades.append(_trade(entry, row.date, exit_price, exit_reason, fee, tax, shares))
             shares, entry, stop, pending_sell = 0, None, None, None
 
         # 3. 收盤：更新停損價、產生明日訊號
@@ -124,7 +129,7 @@ def run(df: pd.DataFrame, signals: pd.DataFrame, capital: float = 1_000_000,
         amt = shares * last.close
         fee, tax = costs.fee(amt), costs.tax(amt)
         cash += amt - fee - tax
-        trades.append(_trade(entry, last.date, last.close, "forced_exit", fee, tax))
+        trades.append(_trade(entry, last.date, last.close, "forced_exit", fee, tax, shares))
         equity[-1].update({"cash": cash, "shares": 0, "equity": cash})
 
     cols = ["entry_date", "entry_price", "exit_date", "exit_price", "shares",
@@ -132,10 +137,11 @@ def run(df: pd.DataFrame, signals: pd.DataFrame, capital: float = 1_000_000,
     return Result(pd.DataFrame(trades, columns=cols), pd.DataFrame(equity), capital)
 
 
-def _trade(entry, exit_date, exit_price, reason, fee, tax):
+def _trade(entry, exit_date, exit_price, reason, fee, tax, exit_shares=None):
     cost = entry["shares"] * entry["entry_price"] + entry["buy_fee"]
     dividends = entry.get("dividends", 0.0)
-    proceeds = entry["shares"] * exit_price - fee - tax + dividends
+    exit_shares = entry["shares"] if exit_shares is None else exit_shares
+    proceeds = exit_shares * exit_price - fee - tax + dividends
     pnl = proceeds - cost
     return {"entry_date": entry["entry_date"], "entry_price": entry["entry_price"],
             "exit_date": exit_date, "exit_price": exit_price, "shares": entry["shares"],
@@ -152,16 +158,19 @@ def buy_and_hold(df: pd.DataFrame, capital: float = 1_000_000, costs: CostModel 
     cash = capital - n * first.open - buy_fee
     if "factor" in df:
         f = df["factor"]
+        down = f < f.shift(1) * (1 - 1e-9)
+        held = n * (f / f.shift(1)).where(down, 1.0).fillna(1.0).cumprod()  # 減資等值縮股
         per_share = (df["close"].shift(1) * (1 - f.shift(1) / f)).where(f > f.shift(1) * (1 + 1e-9), 0.0).fillna(0.0)
-        div_cum = n * per_share.cumsum()
+        div_cum = (held.shift(1).fillna(n) * per_share).cumsum()
     else:
+        held = pd.Series(float(n), index=df.index)
         div_cum = pd.Series(0.0, index=df.index)
-    equity = pd.DataFrame({"date": df["date"], "equity": cash + div_cum + n * df["close"]})
+    equity = pd.DataFrame({"date": df["date"], "equity": cash + div_cum + held * df["close"]})
     last = df.iloc[-1]
-    amt = n * last.close
+    amt = held.iloc[-1] * last.close
     fee, tax = costs.fee(amt), costs.tax(amt)
     equity.loc[equity.index[-1], "equity"] = cash + div_cum.iloc[-1] + amt - fee - tax
     entry = {"entry_date": first.date, "entry_price": first.open, "shares": n, "buy_fee": buy_fee,
              "dividends": float(div_cum.iloc[-1])}
-    trades = pd.DataFrame([_trade(entry, last.date, last.close, "end", fee, tax)])
+    trades = pd.DataFrame([_trade(entry, last.date, last.close, "end", fee, tax, held.iloc[-1])])
     return Result(trades, equity, capital)
