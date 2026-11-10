@@ -1,0 +1,306 @@
+{
+  "source": "FinMind TaiwanStockPrice + TaiwanStockDividendResult + TaiwanStockCapitalReductionReferencePrice",
+  "api": "https://api.finmindtrade.com/api/v4/data",
+  "stock_id": "2330",
+  "fetched_at": "2026-11-07T01:47:23+00:00",
+  "requested_range": [
+    "2015-01-01",
+    "2026-11-06"
+  ],
+  "actual_range": [
+    "2015-01-05",
+    "2026-11-06"
+  ],
+  "rows": 2885,
+  "columns": [
+    "date",
+    "stock_id",
+    "Trading_Volume",
+    "Trading_money",
+    "open",
+    "max",
+    "min",
+    "close",
+    "spread",
+    "Trading_turnover"
+  ],
+  "adjustment": "factor 由除權息日 after_price / before_price 回溯連乘",
+  "ex_rights_events": [
+    {
+      "date": "2015-06-29",
+      "kind": "dividend",
+      "before_price": 146.0,
+      "after_price": 141.5,
+      "prev_close": 146.0,
+      "status": "OK"
+    },
+    {
+      "date": "2016-06-27",
+      "kind": "dividend",
+      "before_price": 159.0,
+      "after_price": 153.0,
+      "prev_close": 159.0,
+      "status": "OK"
+    },
+    {
+      "date": "2017-06-26",
+      "kind": "dividend",
+      "before_price": 217.0,
+      "after_price": 210.0,
+      "prev_close": 217.0,
+      "status": "OK"
+    },
+    {
+      "date": "2018-06-25",
+      "kind": "dividend",
+      "before_price": 227.5,
+      "after_price": 219.5,
+      "prev_close": 227.5,
+      "status": "OK"
+    },
+    {
+      "date": "2019-06-24",
+      "kind": "dividend",
+      "before_price": 248.5,
+      "after_price": 240.5,
+      "prev_close": 248.5,
+      "status": "OK"
+    },
+    {
+      "date": "2019-09-19",
+      "kind": "dividend",
+      "before_price": 267.0,
+      "after_price": 265.0,
+      "prev_close": 267.0,
+      "status": "OK"
+    },
+    {
+      "date": "2019-12-19",
+      "kind": "dividend",
+      "before_price": 344.5,
+      "after_price": 342.0,
+      "prev_close": 344.5,
+      "status": "OK"
+    },
+    {
+      "date": "2020-03-19",
+      "kind": "dividend",
+      "before_price": 260.0,
+      "after_price": 257.5,
+      "prev_close": 260.0,
+      "status": "OK"
+    },
+    {
+      "date": "2020-06-18",
+      "kind": "dividend",
+      "before_price": 315.0,
+      "after_price": 312.5,
+      "prev_close": 315.0,
+      "status": "OK"
+    },
+    {
+      "date": "2020-09-17",
+      "kind": "dividend",
+      "before_price": 458.0,
+      "after_price": 455.5,
+      "prev_close": 458.0,
+      "status": "OK"
+    },
+    {
+      "date": "2020-12-17",
+      "kind": "dividend",
+      "before_price": 512.0,
+      "after_price": 509.5,
+      "prev_close": 512.0,
+      "status": "OK"
+    },
+    {
+      "date": "2021-03-17",
+      "kind": "dividend",
+      "before_price": 613.0,
+      "after_price": 610.5,
+      "prev_close": 613.0,
+      "status": "OK"
+    },
+    {
+      "date": "2021-06-17",
+      "kind": "dividend",
+      "before_price": 605.0,
+      "after_price": 602.5,
+      "prev_close": 605.0,
+      "status": "OK"
+    },
+    {
+      "date": "2021-09-16",
+      "kind": "dividend",
+      "before_price": 607.0,
+      "after_price": 604.25,
+      "prev_close": 607.0,
+      "status": "OK"
+    },
+    {
+      "date": "2021-12-16",
+      "kind": "dividend",
+      "before_price": 600.0,
+      "after_price": 597.25,
+      "prev_close": 600.0,
+      "status": "OK"
+    },
+    {
+      "date": "2022-03-16",
+      "kind": "dividend",
+      "before_price": 558.0,
+      "after_price": 555.25,
+      "prev_close": 558.0,
+      "status": "OK"
+    },
+    {
+      "date": "2022-06-16",
+      "kind": "dividend",
+      "before_price": 509.0,
+      "after_price": 506.25,
+      "prev_close": 509.0,
+      "status": "OK"
+    },
+    {
+      "date": "2022-09-15",
+      "kind": "dividend",
+      "before_price": 480.0,
+      "after_price": 477.25,
+      "prev_close": 480.0,
+      "status": "OK"
+    },
+    {
+      "date": "2022-12-15",
+      "kind": "dividend",
+      "before_price": 480.5,
+      "after_price": 477.75,
+      "prev_close": 480.5,
+      "status": "OK"
+    },
+    {
+      "date": "2023-03-16",
+      "kind": "dividend",
+      "before_price": 511.0,
+      "after_price": 508.25,
+      "prev_close": 511.0,
+      "status": "OK"
+    },
+    {
+      "date": "2023-06-15",
+      "kind": "dividend",
+      "before_price": 590.0,
+      "after_price": 587.25,
+      "prev_close": 590.0,
+      "status": "OK"
+    },
+    {
+      "date": "2023-09-14",
+      "kind": "dividend",
+      "before_price": 541.0,
+      "after_price": 538.0,
+      "prev_close": 541.0,
+      "status": "OK"
+    },
+    {
+      "date": "2023-12-14",
+      "kind": "dividend",
+      "before_price": 577.0,
+      "after_price": 574.0,
+      "prev_close": 577.0,
+      "status": "OK"
+    },
+    {
+      "date": "2024-03-18",
+      "kind": "dividend",
+      "before_price": 753.0,
+      "after_price": 749.5,
+      "prev_close": 753.0,
+      "status": "OK"
+    },
+    {
+      "date": "2024-06-13",
+      "kind": "dividend",
+      "before_price": 909.0,
+      "after_price": 905.5,
+      "prev_close": 909.0,
+      "status": "OK"
+    },
+    {
+      "date": "2024-09-12",
+      "kind": "dividend",
+      "before_price": 901.0,
+      "after_price": 896.99,
+      "prev_close": 901.0,
+      "status": "OK"
+    },
+    {
+      "date": "2024-12-12",
+      "kind": "dividend",
+      "before_price": 1045.0,
+      "after_price": 1041.0,
+      "prev_close": 1045.0,
+      "status": "OK"
+    },
+    {
+      "date": "2025-03-18",
+      "kind": "dividend",
+      "before_price": 970.0,
+      "after_price": 965.49,
+      "prev_close": 970.0,
+      "status": "OK"
+    },
+    {
+      "date": "2025-06-12",
+      "kind": "dividend",
+      "before_price": 1065.0,
+      "after_price": 1060.49,
+      "prev_close": 1065.0,
+      "status": "OK"
+    },
+    {
+      "date": "2025-09-16",
+      "kind": "dividend",
+      "before_price": 1255.0,
+      "after_price": 1249.99,
+      "prev_close": 1255.0,
+      "status": "OK"
+    },
+    {
+      "date": "2025-12-11",
+      "kind": "dividend",
+      "before_price": 1505.0,
+      "after_price": 1499.99,
+      "prev_close": 1505.0,
+      "status": "OK"
+    },
+    {
+      "date": "2026-03-17",
+      "kind": "dividend",
+      "before_price": 1845.0,
+      "after_price": 1838.99,
+      "prev_close": 1845.0,
+      "status": "OK"
+    },
+    {
+      "date": "2026-06-11",
+      "kind": "dividend",
+      "before_price": 2255.0,
+      "after_price": 2248.99,
+      "prev_close": 2255.0,
+      "status": "OK"
+    },
+    {
+      "date": "2026-09-16",
+      "kind": "dividend",
+      "before_price": 2385.0,
+      "after_price": 2377.99,
+      "prev_close": 2385.0,
+      "status": "OK"
+    }
+  ],
+  "sha256": {
+    "2330.csv": "93c90dfdaa9073db9dd648946323b3f15869d9e8add6ccc4c052932d48c9a6dd",
+    "2330_adj.csv": "7a4773d39ea3d57a91c641803c0ae0ff725d82e375186ea0ff00e596c77af52a"
+  }
+}
