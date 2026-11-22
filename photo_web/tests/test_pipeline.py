@@ -306,3 +306,66 @@ def test_usage_counts_per_user_and_blocks_anonymous_sharing(tmp_path):
     u = pl.Usage(str(tmp_path / "usage.json"))
     u.add("a@example.com", 3); u.add("b@example.com", 1); u.add("a@example.com", 2)
     assert (u.used("a@example.com"), u.used("b@example.com"), u.used("anon:s1")) == (5, 1, 0)
+
+
+# ---------- 2026-11-23 網頁第二輪獨立稽核的重現測試 ----------
+def test_zip_dot_prefixed_images_are_counted(job):
+    """稽核 F4：zip 裡檔名以「.」開頭的圖片，既有腳本 prep 會收（只排除「._」），計數與檢查必須用同一個條件。"""
+    import zipfile
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("n.jpg", photo(1, "2026:10:27 09:01:00"))
+        for i in range(2, 8):
+            z.writestr(f"sub/.h{i}.jpg", photo(i, f"2026:10:27 09:{i:02d}:00"))
+        z.writestr("__MACOSX/._n.jpg", b"resource fork")          # 這種 prep 不收，也不算
+    files = [("dot.zip", b.getvalue())]
+    assert pl.count_photos(files) == 7
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="超過"):
+        job.add_photos(files, max_photos=5)
+    job.add_photos(files, max_photos=7)
+    assert len(job.manifest()) == 7                                # 計數與實際收到的張數一致
+
+
+def test_huge_pixel_image_rejected(job):
+    """稽核建議：像素極大但檔案很小的圖（解壓炸彈）在收件時擋下。"""
+    b = io.BytesIO()
+    Image.new("L", (12000, 12000), 255).save(b, "PNG")
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="big.png"):
+        job.add_photos([("big.png", b.getvalue())])
+
+
+def test_sanitize_hides_other_absolute_paths():
+    """稽核建議：錯誤最後一行帶其他絕對路徑時也要遮掉。"""
+    msg = pl.sanitize("Traceback (most recent call last):\n  File \"/x/y.py\", line 1\nValueError: bad /home/appuser/app/photo_web/pipeline.py")
+    assert "/home/appuser" not in msg and "ValueError: bad" in msg
+
+
+def test_usage_try_add_is_atomic_check(tmp_path):
+    """稽核建議：每日上限的檢查與累加要在同一個鎖裡；超過就不加。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    assert u.try_add("a@example.com", 4, limit=5) is True
+    assert u.try_add("a@example.com", 2, limit=5) is False
+    assert u.used("a@example.com") == 4
+    assert u.try_add("a@example.com", 99, limit=0) is True         # 0＝不限
+
+
+def test_job_touch_keeps_active_job_from_sweep(tmp_path):
+    """稽核建議：使用者停在填欄位很久，只要頁面還在重跑（touch）就不被 sweep 清掉。"""
+    j = pl.Job(root=str(tmp_path))
+    t = __import__("time").time() - 7200
+    os.utime(j.dir, (t, t))
+    j.touch()
+    assert pl.sweep(str(tmp_path), max_age_s=3600) == 0 and os.path.exists(j.dir)
+    j.cleanup()
+
+
+def test_access_policy():
+    """稽核 F3／建議：名單變數有設但解析後是空的要擋下；未驗證的 email 不算；有金鑰時要同時有名單與每日上限才啟用付費讀圖。"""
+    assert pl.parse_allowed(None) == (False, set())
+    assert pl.parse_allowed(" , ") == (True, set())
+    assert pl.parse_allowed("A@Example.com, b@example.com") == (True, {"a@example.com", "b@example.com"})
+    assert pl.paid_reading_allowed(allowed={"a@example.com"}, daily=20) is True
+    assert pl.paid_reading_allowed(allowed={"a@example.com"}, daily=0) is False
+    assert pl.paid_reading_allowed(allowed=set(), daily=20) is False

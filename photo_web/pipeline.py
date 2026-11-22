@@ -75,6 +75,7 @@ def sha256_bytes(b: bytes) -> str:
 IMG_EXT = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp")
 MAX_PHOTOS = 20                      # 一次工作的照片張數上限（含 zip 內）
 MAX_BYTES = 300 * 1024 * 1024        # 一次工作解開後的總大小上限
+MAX_PIXELS = 80_000_000              # 單張像素上限（手機照片約 1200～5000 萬；擋像素極大的壓縮炸彈）
 JOB_ROOT = os.path.join(tempfile.gettempdir(), "photo_web_jobs")
 JOB_MAX_AGE_S = 2 * 3600             # 沒有動作超過這個時間的工作資料夾自動清除
 
@@ -82,8 +83,9 @@ JOB_MAX_AGE_S = 2 * 3600             # 沒有動作超過這個時間的工作�
 def _zip_images(data: bytes) -> list[zipfile.ZipInfo]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            return [i for i in z.infolist() if not i.is_dir() and i.filename.lower().endswith(IMG_EXT)
-                    and not os.path.basename(i.filename).startswith(".")]
+            # 條件要和既有腳本 log_photo.prep 完全相同（只排除「._」開頭）；不同的話，上限會被繞過（第二輪稽核 F4）
+            return [i for i in z.infolist() if os.path.basename(i.filename) and i.filename.lower().endswith(IMG_EXT)
+                    and not os.path.basename(i.filename).startswith("._")]
     except zipfile.BadZipFile as e:
         raise PipelineError("zip 檔打不開，請重新壓縮後再上傳") from e
 
@@ -100,7 +102,12 @@ def _check_image(name: str, data: bytes) -> None:
     """內容必須是開得起來的圖片；HEIC 在沒有解碼器的環境不檢查內容（交給既有腳本處理）。"""
     from PIL import Image
     try:
-        Image.open(io.BytesIO(data)).verify()
+        im = Image.open(io.BytesIO(data))
+        if im.width * im.height > MAX_PIXELS:
+            raise PipelineError(f"「{os.path.basename(name)}」的像素太大（上限 {MAX_PIXELS // 1_000_000} 百萬像素），請縮小後重新上傳")
+        im.verify()
+    except PipelineError:
+        raise
     except Exception as e:
         if name.lower().endswith((".heic", ".heif")):
             try:
@@ -119,7 +126,8 @@ def sanitize(text: str, job_dir: str = "") -> str:
     for path, label in ((job_dir, "<工作資料夾>"), (os.environ.get("PHOTO_SKILL_DIR", ""), "<Skill 腳本>")):
         if path:
             text = text.replace(path, label)
-    return re.sub(r"/(?:[\w.+-]+/)+(?:site-packages|dist-packages|lib/python[\d.]+)(?:/[\w.+-]+)*", "<系統>", text)
+    text = re.sub(r"/(?:[\w.+-]+/)+(?:site-packages|dist-packages|lib/python[\d.]+)(?:/[\w.+-]+)*", "<系統>", text)
+    return re.sub(r"(?<![\w<>.])/(?:home|tmp|usr|opt|var|srv|app|mount|mnt|root|workspace|private|Users)(?:/[\w.+@~-]+)+", "<路徑>", text)
 
 
 def sweep(root: str = "", max_age_s: int = JOB_MAX_AGE_S) -> int:
@@ -150,16 +158,35 @@ class Usage:
     def used(self, user: str) -> int:
         return self._load().get(f"{datetime.date.today()}|{user}", 0)
 
-    def add(self, user: str, n: int) -> None:
+    def try_add(self, user: str, n: int, limit: int = 0) -> bool:
+        """在同一個鎖裡檢查上限並累加；超過上限回 False、不加。limit=0 不限。"""
         import fcntl
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path + ".lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             d = {k: v for k, v in self._load().items() if k.startswith(str(datetime.date.today()))}   # 只留今天
             k = f"{datetime.date.today()}|{user}"
+            if limit and d.get(k, 0) + n > limit:
+                return False
             d[k] = d.get(k, 0) + n
             tmp = self.path + ".tmp"
             json.dump(d, open(tmp, "w", encoding="utf-8")); os.replace(tmp, self.path)
+            return True
+
+    def add(self, user: str, n: int) -> None:
+        self.try_add(user, n, 0)
+
+
+def parse_allowed(raw: str | None) -> tuple[bool, set[str]]:
+    """PHOTO_ALLOWED_EMAILS → (有沒有設, 名單)。有設但解析後是空的：視為「有設、沒有人可用」，不是不設限。"""
+    if raw is None:
+        return False, set()
+    return True, {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def paid_reading_allowed(allowed: set[str], daily: int) -> bool:
+    """會產生費用的讀圖：要同時有使用者名單與每日上限才啟用。"""
+    return bool(allowed) and daily > 0
 
 
 def fetch_scripts(dest: str, commit: str = SKILL_COMMIT, local_dir: str | None = None) -> dict[str, str]:
@@ -217,6 +244,14 @@ class Job:
             raise PipelineError(msg, res)
         return res
 
+    def touch(self) -> None:
+        """頁面每次重跑時呼叫：還有人在用，不被 sweep 清掉。"""
+        if os.path.isdir(self.dir):
+            os.utime(self.dir)
+
+    def alive(self) -> bool:
+        return os.path.isdir(self.dir)
+
     def cleanup(self) -> None:
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -268,6 +303,9 @@ class Job:
             res = self.must(self.run("整理照片（zip）", "log_photo.py", "prep", f"incoming/{z}", WORKBOOK), "整理 zip 失敗")
         if res is None:
             raise PipelineError("沒有收到照片")
+        todo = len(self.stopped())
+        if max_photos and todo > max_photos:                # 再用 manifest 複核一次：實際收到的不得多於上限
+            raise PipelineError(f"實際收到 {todo} 張，超過一次 {max_photos} 張的上限，請分批上傳")
         return res
 
     def manifest(self) -> list[dict]:
