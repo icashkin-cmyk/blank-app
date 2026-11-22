@@ -165,6 +165,7 @@ class FixtureReader:
     """驗收用：依照片 SHA-256 讀預先抄好的答案（JSON：{sha256: PhotoRead 欄位}）。找不到就回 None（該張不寫，留給人工）。"""
 
     name = "固定答案"
+    paid = False
 
     def __init__(self, path: str):
         self.data = json.load(open(path, encoding="utf-8"))
@@ -178,6 +179,7 @@ class ClaudeReader:
     """Claude API 視覺讀圖。金鑰只從環境變數或平台密鑰讀（ANTHROPIC_API_KEY），不寫進任何檔案。【NOT_RUN：費用待 MIKO 最後決定】"""
 
     name = "Claude API"
+    paid = True                                           # 每張都會產生費用：中斷時已送出的張數照算每日用量
 
     def __init__(self, model: str | None = None):
         import anthropic  # 延後載入：沒裝 SDK 也能跑其他部分

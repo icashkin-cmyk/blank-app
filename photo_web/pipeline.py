@@ -196,6 +196,70 @@ def parse_daily(raw: str | None) -> tuple[int, str]:
     return (n, "") if n >= 0 else (0, "每日上限（PHOTO_DAILY_LIMIT）不能是負數，請管理者修正。")
 
 
+def recover(usage: "Usage", root: str = "") -> int:
+    """退回「預扣了卻沒結清、也沒有人在處理」的工作（處理中重新整理、斷線），並清掉資料夾。回傳處理了幾個。
+    是否還在處理，用工作資料夾裡的鎖判斷：處理中的那一輪握著鎖，中斷或結束就放開。"""
+    import fcntl
+    root = root or JOB_ROOT
+    n = 0
+    if not os.path.isdir(root):
+        return 0
+    for d in os.listdir(root):
+        full = os.path.join(root, d)
+        rpath = os.path.join(full, "reserve.json")
+        if not (d.startswith("photojob_") and os.path.exists(rpath)):
+            continue
+        try:
+            with open(os.path.join(full, ".busy"), "w") as lk:
+                try:
+                    fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue                                  # 有人正在處理
+                if json.load(open(rpath, encoding="utf-8")).get("settled"):
+                    continue
+                r = claim_reservation(full)
+                if r is None:
+                    continue                                  # 別人已經退過
+                _refund_unspent(usage, r)
+                shutil.rmtree(full, ignore_errors=True); n += 1
+        except Exception:
+            continue
+    return n
+
+
+def claim_reservation(folder: str) -> dict | None:
+    """把預扣紀錄改名取走（改名是原子動作）：同一筆預扣只有一方拿得到，不會退兩次。拿不到回 None。"""
+    src = os.path.join(folder, "reserve.json")
+    dst = os.path.join(folder, f"reserve.claimed.{os.urandom(4).hex()}")
+    try:
+        os.rename(src, dst)
+        return json.load(open(dst, encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _refund_unspent(usage: "Usage", r: dict) -> None:
+    """退回沒結清的預扣；已送去付費讀圖的張數（spent）照算，不退。隔天的紀錄不退（用量已歸零）。"""
+    if not r.get("settled") and r.get("date") == str(datetime.date.today()):
+        usage.refund(r["user"], int(r["n"]) - int(r.get("spent", 0)))
+
+
+def pending_reserved(user: str, root: str = "") -> int:
+    """這個人還沒結清的預扣張數（處理中，或剛中斷、還沒退回）。"""
+    root = root or JOB_ROOT
+    n = 0
+    if not os.path.isdir(root):
+        return 0
+    for d in os.listdir(root):
+        try:
+            r = json.load(open(os.path.join(root, d, "reserve.json"), encoding="utf-8"))
+        except Exception:
+            continue
+        if r.get("user") == user and not r.get("settled") and r.get("date") == str(datetime.date.today()):
+            n += int(r["n"]) - int(r.get("spent", 0))
+    return n
+
+
 def parse_allowed(raw: str | None) -> tuple[bool, set[str]]:
     """PHOTO_ALLOWED_EMAILS → (有沒有設, 名單)。有設但解析後是空的：視為「有設、沒有人可用」，不是不設限。"""
     if raw is None:
@@ -268,6 +332,64 @@ class Job:
         if not res.ok:
             raise PipelineError(msg, res)
         return res
+
+    # ---------- 每日用量：預扣記在工作資料夾，工作階段消失也退得回來 ----------
+    def processing(self):
+        """收件到讀圖完成這一段握著鎖；recover() 看到鎖就不動這個工作。"""
+        import contextlib
+        import fcntl
+
+        @contextlib.contextmanager
+        def _cm():
+            with open(self.p(".busy"), "w") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                yield
+        return _cm()
+
+    def reserve(self, usage: "Usage", user: str, n: int, limit: int = 0) -> bool:
+        if not usage.try_add(user, n, limit):
+            return False
+        self._save_reservation({"user": user, "n": n, "date": str(datetime.date.today()), "settled": False, "spent": 0})
+        return True
+
+    def _save_reservation(self, r: dict) -> None:
+        tmp = self.p("reserve.tmp")
+        json.dump(r, open(tmp, "w", encoding="utf-8")); os.replace(tmp, self.p("reserve.json"))
+
+    def _claim(self) -> dict | None:
+        return claim_reservation(self.dir)
+
+    def _spend(self) -> None:
+        """付費讀圖每送出一張就記一筆：之後中斷，這幾張照算不退。"""
+        r = self._reservation()
+        if r and not r.get("settled"):
+            r["spent"] = int(r.get("spent", 0)) + 1
+            self._save_reservation(r)
+
+    def _reservation(self) -> dict | None:
+        try:
+            return json.load(open(self.p("reserve.json"), encoding="utf-8"))
+        except Exception:
+            return None
+
+    def settle(self, usage: "Usage", actual: int) -> None:
+        """收件與讀圖都完成：只算實際新增的張數，多扣的退回，標成已結清。"""
+        r = self._reservation()
+        if not r or r.get("settled"):
+            return
+        actual = max(actual, int(r.get("spent", 0)))           # 已付費讀過的張數不會少算
+        usage.refund(r["user"], int(r["n"]) - actual)
+        r.update(n=actual, settled=True)
+        self._save_reservation(r)
+
+    def abandon(self, usage: "Usage") -> None:
+        """放棄這個工作並刪除資料夾；還沒結清的預扣退回，已結清的不退。"""
+        r = self._reservation()
+        if r and not r.get("settled"):
+            r = self._claim()
+            if r:
+                _refund_unspent(usage, r)
+        self.cleanup()
 
     def touch(self) -> None:
         """頁面每次重跑時呼叫：還有人在用，不被 sweep 清掉。"""
@@ -367,14 +489,20 @@ class Job:
         """第 2 步文字框的預設內容：讀圖草稿，沒有就用空白範本。"""
         return self.drafts.get(nnn) or self.template(nnn)
 
-    def auto_read(self, reader) -> dict[str, list[str]]:
+    def auto_read(self, reader, on_photo=None) -> dict[str, list[str]]:
         """讀圖後端逐張讀還沒寫入的照片，組成工作檔文字放在草稿（self.drafts）；回傳 {原檔名: 提醒}。
         草稿不寫進 text/NNN.txt：使用者在第 2 步勾選「我已看過」後才由 write_text 寫入
-        （2026-11-23 稽核 W2：草稿先落檔時，沒勾選的照片也會被 addmany 寫入）。一張失敗不影響其他張。"""
+        （2026-11-23 稽核 W2：草稿先落檔時，沒勾選的照片也會被 addmany 寫入）。一張失敗不影響其他張。
+        on_photo(i, n)：每張讀之前呼叫；reader.paid 為真時，每送出一張就記進預扣紀錄（中斷後照算）。"""
         notes = {}
-        for r in self.manifest():
-            if r["狀態"] == "done" or os.path.exists(self.p("text", f"{r['nnn']}.txt")):
-                continue
+        todo = [r for r in self.manifest()
+                if r["狀態"] != "done" and not os.path.exists(self.p("text", f"{r['nnn']}.txt"))]
+        for i, r in enumerate(todo):
+            self.touch()
+            if on_photo:                                      # 頁面在這裡更新進度；使用者中斷時也是從這裡停下（不攔）
+                on_photo(i, len(todo))
+            if getattr(reader, "paid", False):
+                self._spend()
             try:
                 got = reader.read(self.p("photos", f"{r['nnn']}.jpg"), r["sha256"], r["原檔名"])
             except Exception:

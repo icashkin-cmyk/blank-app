@@ -409,3 +409,95 @@ def test_failed_job_creation_leaves_no_folder(tmp_path):
     with pytest.raises(Exception):
         pl.Job(root=str(root), scripts_src=str(empty))
     assert not root.exists() or os.listdir(root) == []
+
+
+# ---------- 2026-11-23 網頁第五輪獨立稽核的重現測試：預扣記在工作資料夾，中斷後能退 ----------
+def test_reservation_survives_lost_session_and_is_recovered(tmp_path):
+    """稽核：處理中重新整理（工作階段消失）時，預扣沒人退，同一人再按就被每日上限擋下。
+    預扣要記在工作資料夾；沒有結清、也沒有人在處理的工作，下一次開頁時退回並清掉。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        assert j.reserve(u, "a@example.com", 13, limit=20) is True
+        assert pl.recover(u, str(tmp_path)) == 0               # 還在處理中：不能動
+        assert u.used("a@example.com") == 13
+    # 工作階段消失：沒有結清，也沒有人持有處理鎖
+    assert pl.recover(u, str(tmp_path)) == 1
+    assert u.used("a@example.com") == 0 and not os.path.exists(j.dir)
+
+
+def test_settle_charges_actual_and_is_not_recovered(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        j.reserve(u, "a@example.com", 13, limit=20)
+        j.settle(u, 11)                                        # 13 張含 2 張重複 → 只算 11
+    assert u.used("a@example.com") == 11
+    assert pl.recover(u, str(tmp_path)) == 0 and os.path.exists(j.dir)   # 已結清的工作不退、不刪
+    j.abandon(u)                                               # 結清後按「結束並刪除暫存」：不退用量
+    assert u.used("a@example.com") == 11 and not os.path.exists(j.dir)
+
+
+def test_abandon_before_settle_refunds(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    j.reserve(u, "a@example.com", 5, limit=20)
+    j.abandon(u)
+    assert u.used("a@example.com") == 0 and not os.path.exists(j.dir)
+
+
+def test_reserve_respects_limit(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    assert j.reserve(u, "a@example.com", 21, limit=20) is False
+    assert u.used("a@example.com") == 0
+    j.abandon(u)
+
+
+# ---------- 2026-11-23 第五輪後補：中斷時付費讀圖已花的張數不退；讀圖可被中斷 ----------
+class _PaidReader(_FakeReader):
+    paid = True
+
+
+def test_interrupted_paid_reading_keeps_spent_photos_charged(job, tmp_path):
+    """處理中被中斷（重新整理、讀圖中改檔案）：已送去付費讀圖的張數照算，其餘退回；
+    否則反覆中斷就能不占額度地一直花讀圖費用。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+
+    class Stop(BaseException):
+        pass
+
+    def on_photo(i, n):
+        if i == 2:                                             # 讀完 2 張後被中斷
+            raise Stop()
+
+    with pytest.raises(Stop):
+        with job.processing():
+            job.reserve(u, "a@example.com", 3, limit=20)
+            _three(job)
+            job.auto_read(_PaidReader(), on_photo=on_photo)
+    assert pl.recover(u, os.path.dirname(job.dir)) == 1
+    assert u.used("a@example.com") == 2
+
+
+def test_interrupted_free_reading_refunds_everything(job, tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    job.reserve(u, "a@example.com", 3, limit=20)
+    _three(job)
+    seen = []
+    job.auto_read(_FakeReader(), on_photo=lambda i, n: seen.append((i, n)))
+    assert seen == [(0, 3), (1, 3), (2, 3)]                    # 每張讀之前呼叫一次（頁面用來更新進度、讓中斷生效）
+    job.abandon(u)
+    assert u.used("a@example.com") == 0
+
+
+def test_refund_happens_only_once(tmp_path):
+    """同一筆預扣只能退一次：abandon 之後 recover 不再退。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j1, j2 = pl.Job(root=str(tmp_path)), pl.Job(root=str(tmp_path))
+    j1.reserve(u, "a@example.com", 5, limit=20)
+    j2.reserve(u, "a@example.com", 4, limit=20)
+    r = j1._claim()
+    assert r and r["n"] == 5 and j1._claim() is None           # 第二次拿不到
+    assert pl.pending_reserved("a@example.com", str(tmp_path)) == 4
+    j1.cleanup(); j2.abandon(u)

@@ -21,8 +21,8 @@ HOURS = pl.JOB_MAX_AGE_S // 3600
 PRIVACY = (f"照片只存在本次工作的暫存資料夾：按左側「結束並刪除暫存」立即刪除；沒按的話，"
            f"閒置超過 {HOURS} 小時後，在下一次有人開啟這個網頁時清除。（手機請點左上角展開側欄。）"
            "有設每日上限時，登入者的 email 與當日張數會記到隔天。")
+LIMIT_NOTE = "處理中請不要重新整理或更換檔案；中斷時沒用到的額度會退回，已送出讀圖的張數仍計入。"
 st.caption(f"依 photo-inspection-log 既有腳本產出公司格式 Excel。腳本版本：{pl.skill_source()}。" + PRIVACY)
-pl.sweep()
 
 
 @st.cache_resource(show_spinner="下載 Skill 腳本…")
@@ -44,8 +44,12 @@ USAGE = pl.Usage()                                    # 側欄的 reset() 會用
 if S.job and not S.job.alive():                       # 工作資料夾已不在（閒置太久被清除）
     S.job, S.stage = None, "upload"
     st.warning("上一次的工作閒置太久，暫存已清除，請重新上傳。")
+if S.job and S.stage == "upload":                     # 上一輪收件或讀圖被中斷（處理中改了檔案等）：清掉並退回沒用到的預扣
+    S.job.abandon(USAGE); S.job = None
 if S.job:
     S.job.touch()
+pl.recover(USAGE)                                     # 別的工作階段中斷留下的預扣（處理中重新整理、斷線）：退回並清掉
+pl.sweep()
 
 
 def show_result(res):
@@ -80,10 +84,8 @@ def guard_upload(fn, *a, **k):
 
 def reset():
     if S.job:
-        S.job.cleanup()
-    if S.get("reserved"):                                 # 收件沒完成：退回預扣的每日用量
-        USAGE.refund(*S.reserved)
-    S.job, S.stage, S.reserved = None, "upload", None
+        S.job.abandon(USAGE)                              # 還沒結清的預扣退回（付費讀圖已送出的張數照算）；已結清的不退
+    S.job, S.stage = None, "upload"
 
 
 def fail_upload(msg: str):
@@ -163,7 +165,7 @@ def page():
         st.caption("隱私說明：" + PRIVACY
                    + ("照片會送到 Claude API 讀取文字。" if READER and READER.name == "Claude API" else "目前不會送到外部服務。"))
         if DAILY:
-            st.caption(f"今日已用 {USAGE.used(user_key())}／{DAILY} 張")
+            st.caption(f"今日已用 {USAGE.used(user_key())}／{DAILY} 張。" + LIMIT_NOTE)
         photos = st.file_uploader(f"照片（可多張，或 zip；一次 {pl.MAX_PHOTOS} 張以內，zip 裡的也算）", type=["jpg", "jpeg", "png", "heic", "heif", "webp", "zip"],
                                   accept_multiple_files=True)
         prev = st.file_uploader("接續上次：上傳上次的材料自主檢查照片.xlsx（沒有就不用）", type=["xlsx"])
@@ -173,30 +175,29 @@ def page():
         # 按下後這一輪按鈕就變成不能按，處理中不能再按第二次（第四輪稽核：連按會重複預扣）
         st.button("開始", type="primary", disabled=(not photos) or go, on_click=lambda: S.update(go=True))
         if go and photos:
-            if S.get("reserved"):                             # 上一輪被中斷留下的預扣：先退回
-                USAGE.refund(*S.reserved); S.reserved = None
-            if S.job:                                         # 上一個沒結束的工作：先清掉
-                S.job.cleanup(); S.job = None
             files = [(p.name, p.getvalue()) for p in photos]
             n_photos = guard_upload(pl.count_photos, files)   # zip 裡的也算（稽核：上限可用 zip 繞過）
             if n_photos > pl.MAX_PHOTOS:
                 fail_upload(f"共 {n_photos} 張，超過一次 {pl.MAX_PHOTOS} 張的上限，請分批上傳。")
-            if DAILY and not USAGE.try_add(user_key(), n_photos, DAILY):   # 檢查與累加在同一個鎖裡
-                fail_upload(f"超過每日上限 {DAILY} 張，請明天再傳或減少張數。")
-            S.reserved = (user_key(), n_photos) if DAILY else None     # 預扣；失敗由 reset() 退回
             S.job = guard_upload(lambda: pl.Job(scripts_src=scripts_cache()))
-            guard_upload(S.job.preflight_start)
-            if prev:
-                guard_upload(S.job.restore, prev.name, prev.getvalue())
-            guard_upload(S.job.add_photos, files)
-            if not S.job.stopped() and not prev:
-                fail_upload("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。")
-            if S.reserved:                                    # 只算實際新增的張數（重複的不算）
-                USAGE.refund(S.reserved[0], S.reserved[1] - len(S.job.stopped()))
-                S.reserved = None
-            if READER:
-                with st.spinner(f"讀圖中（{READER.name}）…"):
-                    S.notes = S.job.auto_read(READER)
+            # 收件到讀圖完成握著處理鎖；預扣記在工作資料夾，這一段被中斷（重新整理、改檔案）也退得回來（第五輪稽核）
+            with S.job.processing():
+                if DAILY and not guard_upload(S.job.reserve, USAGE, user_key(), n_photos, DAILY):   # 檢查與累加在同一個鎖裡
+                    wait = pl.pending_reserved(user_key())
+                    fail_upload(f"超過每日上限 {DAILY} 張，請明天再傳或減少張數。"
+                                + (f"（另有 {wait} 張屬於還在處理或剛中斷的上傳，約一分鐘內會退回，可稍後再試。）" if wait else ""))
+                bar = st.progress(0.0, text="收件中…")
+                guard_upload(S.job.preflight_start)
+                if prev:
+                    guard_upload(S.job.restore, prev.name, prev.getvalue())
+                guard_upload(S.job.add_photos, files)
+                if not S.job.stopped() and not prev:
+                    fail_upload("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。")
+                if READER:
+                    S.notes = S.job.auto_read(
+                        READER, on_photo=lambda i, n: bar.progress(i / max(n, 1), text=f"讀圖中（{READER.name}）第 {i + 1}／{n} 張…"))
+                bar.progress(1.0, text="完成")                 # 使用者已離開時從這裡停下，不會走到結清
+                S.job.settle(USAGE, len(S.job.stopped()))     # 只算實際新增的張數（重複的不算）
             S.stage = "text"; st.rerun()
 
     job = S.job
@@ -325,6 +326,6 @@ except pl.PipelineError as e:
     st.error(str(e))
 except Exception as e:  # 未預期的錯誤：不顯示路徑與堆疊（st.stop／st.rerun 不是 Exception，不會被攔）
     logging.exception("photo_web 未預期的錯誤")
-    if S.stage == "upload":
-        reset()
+    if S.stage == "upload":                               # 清掉半成品、退回預扣，重跑頁面讓「開始」可以再按（第五輪稽核建議）
+        fail_upload(f"發生未預期的錯誤（{e.__class__.__name__}），沒有收下照片，請重試。")
     st.error(f"發生未預期的錯誤（{e.__class__.__name__}），這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")
