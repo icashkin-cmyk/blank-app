@@ -65,20 +65,65 @@ with st.sidebar:
             for r in S.job.log:
                 st.write(f"{'✅' if r.ok else '⛔'} {r.name}（{r.returncode}）")
 
+# ---------- 使用權限與用量（給外人使用時）----------
+ALLOWED = {e.strip().lower() for e in os.environ.get("PHOTO_ALLOWED_EMAILS", "").split(",") if e.strip()}
+DAILY = int(os.environ.get("PHOTO_DAILY_LIMIT", "0") or 0)   # 每人每日張數上限；0＝不限
+USAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".usage.json")
+
+
+def who() -> str:
+    try:
+        return (st.user.email or "").lower() if getattr(st.user, "is_logged_in", True) else ""
+    except Exception:
+        return ""
+
+
+def used_today(email: str) -> int:
+    import datetime, json
+    try:
+        return json.load(open(USAGE)).get(f"{datetime.date.today()}|{email}", 0)
+    except Exception:
+        return 0
+
+
+def add_usage(email: str, n: int) -> None:
+    import datetime, json
+    try:
+        d = json.load(open(USAGE))
+    except Exception:
+        d = {}
+    k = f"{datetime.date.today()}|{email}"
+    d[k] = d.get(k, 0) + n
+    json.dump(d, open(USAGE, "w"))
+
+
+if ALLOWED and who() not in ALLOWED:
+    st.error("這個帳號沒有使用權限，請向管理者申請。")
+    st.stop()
+
 # ---------- 1 上傳 ----------
 if S.stage == "upload":
     st.header("1 上傳照片")
+    st.caption("隱私說明：照片只存在本次工作的暫存資料夾，按「結束並刪除暫存」或下載後刪除；"
+               + ("照片會送到 Claude API 讀取文字。" if READER and READER.name == "Claude API" else "目前不會送到外部服務。"))
+    if DAILY:
+        st.caption(f"今日已用 {used_today(who())}／{DAILY} 張")
     photos = st.file_uploader("施工查驗照片（可多張，或一個 zip；20 張以內）", type=["jpg", "jpeg", "png", "heic", "heif", "webp", "zip"],
                               accept_multiple_files=True)
     prev = st.file_uploader("接續上次：上傳上次的材料自主檢查照片.xlsx（沒有就不用）", type=["xlsx"])
     if st.button("開始", type="primary", disabled=not photos):
         if len([p for p in photos if not p.name.lower().endswith(".zip")]) > 20:
             st.error("超過 20 張，請改傳 zip 或分批。"); st.stop()
+        n_photos = len([p for p in photos if not p.name.lower().endswith(".zip")])
+        if DAILY and used_today(who()) + n_photos > DAILY:
+            st.error(f"超過每日上限 {DAILY} 張，請明天再傳或減少張數。"); st.stop()
         S.job = pl.Job(scripts_src=scripts_cache())
         guard(S.job.preflight_start)
         if prev:
             guard(S.job.restore, prev.name, prev.getvalue())
         guard(S.job.add_photos, [(p.name, p.getvalue()) for p in photos])
+        if DAILY:
+            add_usage(who(), len(S.job.manifest()))
         if READER:
             with st.spinner(f"讀圖中（{READER.name}）…"):
                 S.notes = S.job.auto_read(READER)

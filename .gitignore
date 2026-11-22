@@ -169,8 +169,10 @@ data/cache/
 
 # photo_web：下載的 Skill 腳本快取；照片與產出一律不進 repo
 photo_web/.skill_cache/
+photo_web/.usage.json
 *.jpg
 *.jpeg
 *.heic
 photo_web/**/*.xlsx
 photo_web/**/*.pdf
+.usage.json
