@@ -1,6 +1,6 @@
-"""photo_web/app.py｜S1 最小成品：上傳施工查驗照片 → 逐張填白板文字 → 既有腳本產出「材料自主檢查照片.xlsx」。
+"""photo_web/app.py｜上傳照片 → 讀圖草稿逐張核對 → 既有腳本產出「材料自主檢查照片.xlsx」。
 執行：streamlit run photo_web/app.py
-S1 不接 AI，白板文字由使用者自己抄寫；規則照 photo-inspection-log SKILL.md。"""
+讀圖（reader.py）有固定答案、Claude API、人工抄寫三種；規則照 photo-inspection-log SKILL.md。"""
 import os
 import sys
 
@@ -11,13 +11,21 @@ import pipeline as pl  # noqa: E402
 import reader as rd  # noqa: E402
 
 st.set_page_config(page_title="材料自主檢查照片", page_icon="📷", layout="wide")
-st.title("材料自主檢查照片產生器（S1 測試版）")
-st.caption(f"依 photo-inspection-log 既有腳本產出公司格式 Excel。腳本版本：miko {pl.SKILL_COMMIT[:7]}。"
-           "照片只存在本次工作的暫存資料夾，按「結束並刪除暫存」或關閉工作後刪除。")
+try:
+    st.set_option("client.showErrorDetails", False)   # 例外不顯示程式路徑（稽核 W4）
+except Exception:
+    pass
+st.title("材料自主檢查照片產生器")
+HOURS = pl.JOB_MAX_AGE_S // 3600
+PRIVACY = (f"照片只存在本次工作的暫存資料夾：按左側「結束並刪除暫存」立即刪除；沒按的話，最後一次操作後約 {HOURS} 小時內自動清除。")
+st.caption(f"依 photo-inspection-log 既有腳本產出公司格式 Excel。腳本版本：{pl.skill_source()}。" + PRIVACY)
+pl.sweep()
 
 
 @st.cache_resource(show_spinner="下載 Skill 腳本…")
 def scripts_cache() -> str:
+    if os.environ.get("PHOTO_SKILL_DIR"):               # 本機腳本：直接用，不走固定 commit 的快取（稽核：設了卻仍用舊快取）
+        return os.environ["PHOTO_SKILL_DIR"]
     d = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".skill_cache", pl.SKILL_COMMIT)
     if not all(os.path.exists(os.path.join(d, n)) for n in pl.SKILL_FILES):
         pl.fetch_scripts(d)
@@ -43,6 +51,13 @@ def guard(fn, *a, **k):
         st.error(str(e))
         if e.result:
             show_result(e.result)
+        if S.stage == "upload":                           # 收件階段失敗：不留下半成品資料夾
+            reset()
+        st.stop()
+    except Exception as e:                                # 其他例外：不顯示路徑與堆疊
+        st.error(f"發生未預期的錯誤（{e.__class__.__name__}），這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")
+        if S.stage == "upload":
+            reset()
         st.stop()
 
 
@@ -68,62 +83,75 @@ with st.sidebar:
 # ---------- 使用權限與用量（給外人使用時）----------
 ALLOWED = {e.strip().lower() for e in os.environ.get("PHOTO_ALLOWED_EMAILS", "").split(",") if e.strip()}
 DAILY = int(os.environ.get("PHOTO_DAILY_LIMIT", "0") or 0)   # 每人每日張數上限；0＝不限
-USAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".usage.json")
+USAGE = pl.Usage()
 
 
-def who() -> str:
+def email() -> str:
     try:
-        return (st.user.email or "").lower() if getattr(st.user, "is_logged_in", True) else ""
+        return (st.user.email or "").lower() if st.user.is_logged_in else ""
     except Exception:
         return ""
 
 
-def used_today(email: str) -> int:
-    import datetime, json
-    try:
-        return json.load(open(USAGE)).get(f"{datetime.date.today()}|{email}", 0)
-    except Exception:
-        return 0
+def user_key() -> str:
+    """用量的鍵：登入者用 email；沒登入用工作階段代號（不讓所有匿名使用者共用同一個額度）。"""
+    if email():
+        return email()
+    S.setdefault("anon", os.urandom(6).hex())
+    return "anon:" + S.anon
 
 
-def add_usage(email: str, n: int) -> None:
-    import datetime, json
-    try:
-        d = json.load(open(USAGE))
-    except Exception:
-        d = {}
-    k = f"{datetime.date.today()}|{email}"
-    d[k] = d.get(k, 0) + n
-    json.dump(d, open(USAGE, "w"))
+if ALLOWED:
+    if not email():
+        st.info("這個網頁只開放給名單內的人，請先登入。")
+        try:
+            if st.button("登入", type="primary"):
+                st.login()
+        except Exception:
+            st.error("登入功能尚未設定（管理者需在平台密鑰設定填入 [auth] 登入設定，見 README）。")
+        st.stop()
+    if email() not in ALLOWED:
+        st.error("這個帳號沒有使用權限，請向管理者申請。")
+        if st.button("登出"):
+            st.logout()
+        st.stop()
 
-
-if ALLOWED and who() not in ALLOWED:
-    st.error("這個帳號沒有使用權限，請向管理者申請。")
-    st.stop()
+if READER and READER.name == "Claude API" and not ALLOWED:
+    # 會產生費用的讀圖只在有使用者名單時啟用，避免任何人都能用金鑰（稽核 W4）
+    st.warning("已設定 Claude API 金鑰，但沒有設定使用者名單（PHOTO_ALLOWED_EMAILS），為避免費用失控，這次改用人工抄寫。")
+    READER = None
 
 # ---------- 1 上傳 ----------
 if S.stage == "upload":
     st.header("1 上傳照片")
-    st.caption("隱私說明：照片只存在本次工作的暫存資料夾，按「結束並刪除暫存」或下載後刪除；"
+    st.caption("隱私說明：" + PRIVACY
                + ("照片會送到 Claude API 讀取文字。" if READER and READER.name == "Claude API" else "目前不會送到外部服務。"))
     if DAILY:
-        st.caption(f"今日已用 {used_today(who())}／{DAILY} 張")
-    photos = st.file_uploader("施工查驗照片（可多張，或一個 zip；20 張以內）", type=["jpg", "jpeg", "png", "heic", "heif", "webp", "zip"],
+        st.caption(f"今日已用 {USAGE.used(user_key())}／{DAILY} 張")
+    photos = st.file_uploader(f"照片（可多張，或 zip；一次 {pl.MAX_PHOTOS} 張以內，zip 裡的也算）", type=["jpg", "jpeg", "png", "heic", "heif", "webp", "zip"],
                               accept_multiple_files=True)
     prev = st.file_uploader("接續上次：上傳上次的材料自主檢查照片.xlsx（沒有就不用）", type=["xlsx"])
     if st.button("開始", type="primary", disabled=not photos):
-        if len([p for p in photos if not p.name.lower().endswith(".zip")]) > 20:
-            st.error("超過 20 張，請改傳 zip 或分批。"); st.stop()
-        n_photos = len([p for p in photos if not p.name.lower().endswith(".zip")])
-        if DAILY and used_today(who()) + n_photos > DAILY:
+        files = [(p.name, p.getvalue()) for p in photos]
+        try:
+            n_photos = pl.count_photos(files)             # zip 裡的也算（稽核：上限可用 zip 繞過）
+        except pl.PipelineError as e:
+            st.error(str(e)); st.stop()
+        if n_photos > pl.MAX_PHOTOS:
+            st.error(f"共 {n_photos} 張，超過一次 {pl.MAX_PHOTOS} 張的上限，請分批上傳。"); st.stop()
+        if DAILY and USAGE.used(user_key()) + n_photos > DAILY:
             st.error(f"超過每日上限 {DAILY} 張，請明天再傳或減少張數。"); st.stop()
+        if S.job:                                         # 上一個沒結束的工作：先清掉
+            S.job.cleanup()
         S.job = pl.Job(scripts_src=scripts_cache())
         guard(S.job.preflight_start)
         if prev:
             guard(S.job.restore, prev.name, prev.getvalue())
-        guard(S.job.add_photos, [(p.name, p.getvalue()) for p in photos])
+        guard(S.job.add_photos, files)
+        if not S.job.stopped() and not prev:
+            st.warning("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。"); reset(); st.stop()
         if DAILY:
-            add_usage(who(), len(S.job.manifest()))
+            USAGE.add(user_key(), n_photos)
         if READER:
             with st.spinner(f"讀圖中（{READER.name}）…"):
                 S.notes = S.job.auto_read(READER)
@@ -149,12 +177,11 @@ if S.stage == "text":
         with c1:
             st.image(job.p("photos", f"{nnn}_grid.jpg"), use_container_width=True)
         with c2:
-            draft = job.p("text", f"{nnn}.txt")
-            val = open(draft, encoding="utf-8").read().split("\n", 1)[1] if os.path.exists(draft) else job.template(nnn)
+            val = job.draft(nnn)                          # 讀圖草稿只在記憶體，勾選後才寫檔
             for w in S.notes.get(r["原檔名"], []):
                 st.warning(w)
             st.text_area("照片文字（工作檔格式；讀圖草稿請逐字核對）", value=val, height=320, key=f"t{nnn}")
-            have = job.fixed(nnn)
+            have = job.fixed(nnn) or job.draft_fixed.get(nnn, {})
             with st.expander("固定欄位（照片上有才填）", expanded=bool(have)):
                 for f in pl.FIXED_FIELDS:
                     st.text_input(f, value=have.get(f, ""), key=f"f{nnn}{f}")
@@ -227,6 +254,16 @@ if S.stage == "done":
     for r in job.log[-2:]:
         show_result(r)
     st.success("交檔檢查全部 PASS。")
+    ents = S.get("entries") or []
+    todo_notes = []
+    n_sec = sum(1 for e in ents if not e["sec"]); n_item = sum(1 for e in ents if not e["item"])
+    n_q = sum(ln.count("〔?") for e in ents for ln in e["design"] + e["measured"])
+    if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆")
+    if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
+    if n_q: todo_notes.append(f"看不清的字〔?〕：{n_q} 處（請對照原照片確認後，下次上傳這份 Excel 接續修改）")
+    todo_notes += [ln for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")]
+    if todo_notes:
+        st.warning("交檔前請留意：\n\n" + "\n".join(f"- {t}" for t in todo_notes))
     st.download_button("下載 材料自主檢查照片.xlsx", job.output_bytes(), file_name=pl.OUTPUT, type="primary",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.download_button("下載 交檔檢查紀錄.txt", job.check_report().encode("utf-8"), file_name="交檔檢查紀錄.txt", mime="text/plain")

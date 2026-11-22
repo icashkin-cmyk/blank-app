@@ -161,6 +161,8 @@ def test_fixture13_end_to_end(job):
     notes = job.auto_read(rdr)
     assert len(notes) == 11
     assert all(not any("與白板相同" in w for w in ws) for ws in notes.values())  # 沒有拿白板值充當讀數
+    for r in job.manifest():                                           # 模擬使用者逐張勾選「我已看過」
+        job.write_text(r["nnn"], job.draft(r["nnn"]), job.draft_fixed.get(r["nnn"]))
     res = job.addmany()
     assert "寫入 11 張" in res.stdout, res.stdout
     assert job.stopped() == []
@@ -213,3 +215,94 @@ def test_warning_when_reading_copies_whiteboard():
     import reader as rd
     r = rd.PhotoRead.from_dict({"kind": "量測", "fixed": {}, "lines": ["〈品名〉｜3.67m"], "readings": ["捲尺讀數：3.67m"]})
     assert any("與白板相同" in w for w in rd.warnings(r))
+
+
+# ---------- 2026-11-23 網頁獨立稽核（W2、W4）必修項目的重現測試 ----------
+class _FakeReader:
+    name = "假讀圖"
+
+    def __init__(self, fail_on=()):
+        self.fail_on = set(fail_on)
+
+    def read(self, image_path, sha256, original_name):
+        import reader as rd
+        if original_name in self.fail_on:
+            raise RuntimeError("API 壞了 /secret/path")
+        return rd.PhotoRead.from_dict({"kind": "白板", "fixed": {}, "inspect_date": "115.10.27", "photo_date": "2026-10-27",
+                                       "item": "〈項目〉", "lines": ["〈字〉"]})
+
+
+def _three(job):
+    job.preflight_start()
+    job.add_photos([(f"IMG_{i:04d}.JPG", photo(i, f"2026:10:27 09:{i:02d}:00")) for i in range(1, 4)])
+    return job.manifest()
+
+
+def test_unchecked_photos_are_not_written(job):
+    """稽核 W2：讀圖草稿在使用者勾選前不得落在 text/NNN.txt；只勾 1 張就只寫入 1 張。"""
+    rows = _three(job)
+    job.auto_read(_FakeReader())
+    assert not any(os.path.exists(job.p("text", f"{r['nnn']}.txt")) for r in rows)
+    assert all("〈字〉" in job.draft(r["nnn"]) for r in rows)
+    job.write_text(rows[0]["nnn"], job.draft(rows[0]["nnn"]), None)
+    job.addmany()
+    assert len(job.stopped()) == 2
+
+
+def test_auto_read_survives_one_failure(job):
+    """稽核 W3：一張讀圖失敗不得整批失敗；該張留給人工，訊息不帶內部細節。"""
+    rows = _three(job)
+    notes = job.auto_read(_FakeReader(fail_on={"IMG_0002.JPG"}))
+    assert notes["IMG_0002.JPG"] == ["讀圖失敗，請人工抄寫"]
+    assert "〈字〉" in job.draft(rows[0]["nnn"]) and "〈字〉" in job.draft(rows[2]["nnn"])
+    assert "〈字〉" not in job.draft(rows[1]["nnn"])
+
+
+def test_photo_count_includes_zip_and_limit(job):
+    """稽核 W4：張數上限要算 zip 裡的照片；超過上限在解壓前就擋下。"""
+    import zipfile
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for i in range(1, 6):
+            z.writestr(f"p{i}.jpg", photo(i, f"2026:10:27 09:{i:02d}:00"))
+    files = [("a.zip", b.getvalue()), ("x.jpg", photo(9, "2026:10:27 10:00:00"))]
+    assert pl.count_photos(files) == 6
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="超過"):
+        job.add_photos(files, max_photos=5)
+    assert job.manifest() == []
+
+
+def test_non_image_rejected_with_clear_message(job):
+    """稽核 W5(b)：副檔名是 jpg 但內容不是圖片，要在收件時擋下並說是哪個檔，不得進到後面才丟 Traceback。"""
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="fake.jpg"):
+        job.add_photos([("fake.jpg", b"this is not an image")])
+    assert job.manifest() == []
+
+
+def test_report_and_messages_hide_server_paths(job, monkeypatch):
+    """稽核 W4：交檔檢查紀錄與顯示給使用者的輸出不得出現伺服器路徑。"""
+    monkeypatch.setenv("PHOTO_SKILL_DIR", os.environ.get("PHOTO_SKILL_DIR", "/srv/secret/scripts"))
+    job.preflight_start()
+    rep = job.check_report()
+    assert job.dir not in rep and os.environ["PHOTO_SKILL_DIR"] not in rep
+    msg = pl.sanitize(f'Traceback\n  File "{job.dir}/scripts/x.py", line 3\n  File "/usr/lib/python3/site-packages/PIL/Image.py"\nValueError: 壞了', job.dir)
+    assert job.dir not in msg and "site-packages" not in msg and "ValueError: 壞了" in msg
+
+
+def test_sweep_removes_old_jobs(tmp_path):
+    """稽核 W4：沒按「結束並刪除暫存」的工作資料夾，逾時要自動清掉；還在用的不動。"""
+    old, new = pl.Job(root=str(tmp_path)), pl.Job(root=str(tmp_path))
+    t = __import__("time").time() - 7200
+    os.utime(old.dir, (t, t))
+    assert pl.sweep(str(tmp_path), max_age_s=3600) == 1
+    assert not os.path.exists(old.dir) and os.path.exists(new.dir)
+    new.cleanup()
+
+
+def test_usage_counts_per_user_and_blocks_anonymous_sharing(tmp_path):
+    """稽核 W4：每日用量按使用者分開；沒登入的人不共用同一個額度鍵（改用工作階段代號）。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    u.add("a@example.com", 3); u.add("b@example.com", 1); u.add("a@example.com", 2)
+    assert (u.used("a@example.com"), u.used("b@example.com"), u.used("anon:s1")) == (5, 1, 0)

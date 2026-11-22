@@ -14,8 +14,43 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
 
 ## 讀圖方式（`reader.make_reader()`）
 - `PHOTO_FIXTURE=<answers.json>`：固定答案（驗收用，依照片 SHA-256 對應）
-- `ANTHROPIC_API_KEY`（平台密鑰設定，不寫進檔案）：Claude API 視覺讀圖。**尚未實跑，費用待決定**
+- `ANTHROPIC_API_KEY`（平台密鑰設定，不寫進檔案）：Claude API 視覺讀圖。**尚未實跑（NOT_RUN），費用待決定**。
+  只有同時設了 `PHOTO_ALLOWED_EMAILS` 才會啟用，避免任何人都能用到金鑰；一張讀圖失敗只影響那一張，改人工抄寫。
 - 都沒有：人工抄寫
+
+讀圖結果只是草稿，放在記憶體；使用者在第 2 步逐張勾選「我已看過」後才寫入。沒勾的照片不會寫入，也到不了下一步。
+
+## 環境變數
+| 名稱 | 用途 | 預設 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Claude API 讀圖的金鑰，只填在平台密鑰設定 | 無（人工抄寫） |
+| `PHOTO_READER_MODEL` | 讀圖模型 | `claude-opus-5-5` |
+| `PHOTO_ALLOWED_EMAILS` | 可使用的 email，逗號分隔；設了就要先登入 | 無（不限、不需登入） |
+| `PHOTO_DAILY_LIMIT` | 每人每日張數上限（zip 裡的也算） | 0（不限） |
+| `PHOTO_SKILL_DIR` | 改用本機的 Skill 腳本資料夾（開發用） | 無（從 GitHub 固定 commit 下載） |
+| `PHOTO_FIXTURE` | 固定讀圖答案（驗收用） | 無 |
+
+## 限制
+- 一次 20 張以內（`pipeline.MAX_PHOTOS`，zip 裡的也算）、解開後總大小 300MB 以內；副檔名是圖片但內容打不開的檔會在收件時擋下。
+- 同名檔案會互相覆蓋，上傳前請確認檔名不同。
+- PDF 預覽需要環境裝有 LibreOffice；雲端沒有新細明體、標楷體時，PDF 的欄寬與字型和電腦版 Excel 不同，只供抽看。
+- 每日用量記在暫存資料夾，容器重啟會歸零；沒登入的人以工作階段計，換瀏覽器就重算，所以要控管費用請設使用者名單。
+- 工作資料夾在 `<暫存>/photo_web_jobs/`：按「結束並刪除暫存」立即刪除；沒按時，最後一次操作後約 2 小時內自動清除（下一次有人開頁面時清）。
+
+## 部署（Streamlit Community Cloud，尚未實際部署）
+1. 在 share.streamlit.io 新增 App：repo `icashkin-cmyk/blank-app`、主檔 `photo_web/app.py`、相依檔 `photo_web/requirements.txt`。
+2. 需要 PDF 預覽時，在 repo 根目錄加 `packages.txt`（內容 `libreoffice`）。
+3. 在 App 的 Secrets 填環境變數（上表）。要限制使用者時再加 Streamlit 的登入設定：
+   ```
+   [auth]
+   redirect_uri = "https://<你的 App 網址>/oauth2callback"
+   cookie_secret = "<自己產生的隨機字串>"
+   client_id = "<OIDC client id>"
+   client_secret = "<OIDC client secret>"
+   server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+   ```
+   金鑰與上列密鑰只填在平台的 Secrets，不寫進 repo。
+4. 建議在 App 設定關掉工具列與錯誤細節：`client.toolbarMode = "viewer"`、`client.showErrorDetails = false`（程式已在啟動時嘗試關閉錯誤細節）。
 
 ## 執行與測試
 ```
@@ -23,4 +58,6 @@ pip install -r photo_web/requirements.txt
 streamlit run photo_web/app.py
 PHOTO_SKILL_DIR=<miko>/skills/photo-inspection-log/scripts python3 -m pytest -q photo_web/tests
 ```
-13 張驗收照片含工地與個人資訊，只放私有專案檔（`PHOTO_FIXTURE_DIR`），不進本公開 repo。
+- 目前 `pipeline.SKILL_COMMIT` 固定在舊版腳本；photo-inspection-log v0.23（make_entries v0.5、build_company v0.6、log_photo v0.17）合併進 miko main 後要改成新的 commit。
+  在那之前，不設 `PHOTO_SKILL_DIR` 跑測試會有 2 項失敗（預期新版腳本的行為），正式部署也會用到舊版腳本。
+- 13 張驗收照片含工地與個人資訊，只放私有專案檔（`PHOTO_FIXTURE_DIR`），不進本公開 repo。

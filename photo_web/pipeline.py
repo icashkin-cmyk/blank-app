@@ -1,28 +1,33 @@
-"""photo_web/pipeline.py｜S1 流程控制：照順序呼叫 photo-inspection-log 的既有腳本，不改寫腳本邏輯。
+"""photo_web/pipeline.py｜流程控制：照順序呼叫 photo-inspection-log 的既有腳本，不改寫腳本邏輯。
 
 每次工作（Job）一個暫存資料夾，結構與 SKILL.md「一、整包取得」相同：
     <工作資料夾>/scripts/   既有腳本與範本（取自 miko main 固定 commit）
     <工作資料夾>/           執行目錄（incoming/、photos/、text/、fixed/、manifest.csv、照片紀錄.xlsx …）
-S1 不接 AI：白板文字由使用者在網頁上逐張填寫，本模組只負責寫檔與呼叫腳本。
+讀圖草稿（reader.py）只放在記憶體，使用者逐張核對勾選後才寫檔；本模組只負責檢查收件、寫檔與呼叫腳本。
 """
 from __future__ import annotations
 
 import csv
+import datetime
 import hashlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 
 from openpyxl import load_workbook
 
 import reader as rd
 
-# 網頁鎖定的 Skill 版本（miko main；待 MIKO／總召確認）。腳本最後一次修改在 c573e81，本 commit 的腳本與其相同。
+# 網頁鎖定的 Skill 版本（miko main）。這個 commit 是舊版腳本；photo-inspection-log v0.23 合併進 main 後要改成新的 commit（見 README）。
 SKILL_COMMIT = "a79ddfde2c7eaaaad8da9ada9e0ef15ccfb70a6e"
 SKILL_FILES = ["log_photo.py", "build_company.py", "make_entries.py", "preflight.py", "forms.csv", "材料自主檢查照片_範本.xlsx"]
 RAW_URL = "https://raw.githubusercontent.com/icashkin-cmyk/miko/{commit}/skills/photo-inspection-log/scripts/{name}"
@@ -30,6 +35,11 @@ WORKBOOK = "照片紀錄.xlsx"
 OUTPUT = "材料自主檢查照片.xlsx"
 TEXT_FIELDS = ["查驗時間", "照片日期", "查驗項目", "位置", "檢查人員"]
 FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
+
+
+def skill_source() -> str:
+    """實際使用的 Skill 腳本來源（頁面與檢查紀錄都顯示這個，不顯示伺服器路徑）。"""
+    return "本機腳本（PHOTO_SKILL_DIR，未固定版本）" if os.environ.get("PHOTO_SKILL_DIR") else f"miko {SKILL_COMMIT[:7]}"
 
 
 class PipelineError(Exception):
@@ -62,6 +72,96 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+IMG_EXT = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp")
+MAX_PHOTOS = 20                      # 一次工作的照片張數上限（含 zip 內）
+MAX_BYTES = 300 * 1024 * 1024        # 一次工作解開後的總大小上限
+JOB_ROOT = os.path.join(tempfile.gettempdir(), "photo_web_jobs")
+JOB_MAX_AGE_S = 2 * 3600             # 沒有動作超過這個時間的工作資料夾自動清除
+
+
+def _zip_images(data: bytes) -> list[zipfile.ZipInfo]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            return [i for i in z.infolist() if not i.is_dir() and i.filename.lower().endswith(IMG_EXT)
+                    and not os.path.basename(i.filename).startswith(".")]
+    except zipfile.BadZipFile as e:
+        raise PipelineError("zip 檔打不開，請重新壓縮後再上傳") from e
+
+
+def count_photos(files: list[tuple[str, bytes]]) -> int:
+    """上傳的照片張數，zip 裡的也算（2026-11-23 稽核：只算散檔時，上限可用 zip 繞過）。"""
+    n = 0
+    for name, data in files:
+        n += len(_zip_images(data)) if name.lower().endswith(".zip") else 1
+    return n
+
+
+def _check_image(name: str, data: bytes) -> None:
+    """內容必須是開得起來的圖片；HEIC 在沒有解碼器的環境不檢查內容（交給既有腳本處理）。"""
+    from PIL import Image
+    try:
+        Image.open(io.BytesIO(data)).verify()
+    except Exception as e:
+        if name.lower().endswith((".heic", ".heif")):
+            try:
+                import pillow_heif  # noqa: F401
+            except ImportError:
+                return
+        raise PipelineError(f"「{os.path.basename(name)}」不是可以開啟的圖片，請移除後重新上傳") from e
+
+
+def sanitize(text: str, job_dir: str = "") -> str:
+    """給使用者看的輸出：拿掉伺服器路徑與 Traceback 細節（2026-11-23 稽核 W4）。"""
+    if "Traceback (most recent call last)" in text:
+        head, _, tail = text.partition("Traceback (most recent call last)")
+        last = [ln for ln in tail.splitlines() if ln.strip() and not ln.startswith(" ")]
+        text = head + "程式錯誤：" + (last[-1] if last else "（無訊息）") + "\n"
+    for path, label in ((job_dir, "<工作資料夾>"), (os.environ.get("PHOTO_SKILL_DIR", ""), "<Skill 腳本>")):
+        if path:
+            text = text.replace(path, label)
+    return re.sub(r"/(?:[\w.+-]+/)+(?:site-packages|dist-packages|lib/python[\d.]+)(?:/[\w.+-]+)*", "<系統>", text)
+
+
+def sweep(root: str = "", max_age_s: int = JOB_MAX_AGE_S) -> int:
+    """清掉太久沒動的工作資料夾（使用者沒按「結束並刪除暫存」就關掉分頁時）。回傳清掉幾個。"""
+    root = root or JOB_ROOT
+    n, now = 0, time.time()
+    if not os.path.isdir(root):
+        return 0
+    for d in os.listdir(root):
+        full = os.path.join(root, d)
+        if d.startswith("photojob_") and os.path.isdir(full) and now - os.path.getmtime(full) > max_age_s:
+            shutil.rmtree(full, ignore_errors=True); n += 1
+    return n
+
+
+class Usage:
+    """每人每日張數。鍵是「日期|使用者」；檔案放在工作根目錄（不進 repo），寫入時上鎖。容器重啟會歸零。"""
+
+    def __init__(self, path: str = ""):
+        self.path = path or os.path.join(JOB_ROOT, "usage.json")
+
+    def _load(self) -> dict:
+        try:
+            return json.load(open(self.path, encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def used(self, user: str) -> int:
+        return self._load().get(f"{datetime.date.today()}|{user}", 0)
+
+    def add(self, user: str, n: int) -> None:
+        import fcntl
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path + ".lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            d = {k: v for k, v in self._load().items() if k.startswith(str(datetime.date.today()))}   # 只留今天
+            k = f"{datetime.date.today()}|{user}"
+            d[k] = d.get(k, 0) + n
+            tmp = self.path + ".tmp"
+            json.dump(d, open(tmp, "w", encoding="utf-8")); os.replace(tmp, self.path)
+
+
 def fetch_scripts(dest: str, commit: str = SKILL_COMMIT, local_dir: str | None = None) -> dict[str, str]:
     """把既有腳本放進 dest，回傳 {檔名: SHA-256}。local_dir（或環境變數 PHOTO_SKILL_DIR）有值時從本機複製，否則從 GitHub 固定 commit 下載。"""
     os.makedirs(dest, exist_ok=True)
@@ -86,7 +186,11 @@ class Job:
     """一次工作：上傳 → 抄寫 → 寫入 → entries → 產出 → 交檔檢查。"""
 
     def __init__(self, root: str | None = None, scripts_src: str | None = None):
+        root = root or JOB_ROOT
+        os.makedirs(root, exist_ok=True)
         self.dir = tempfile.mkdtemp(prefix="photojob_", dir=root)
+        self.drafts: dict[str, str] = {}             # nnn → 讀圖草稿（使用者勾選前不寫進 text/）
+        self.draft_fixed: dict[str, dict] = {}       # nnn → 讀圖讀到的固定欄位
         self.scripts = os.path.join(self.dir, "scripts")
         self.log: list[StepResult] = []
         self.reads: dict[str, rd.PhotoRead] = {}   # sha256 → 讀圖結果（建議欄位用）
@@ -103,7 +207,8 @@ class Job:
     def run(self, name: str, script: str, *args: str) -> StepResult:
         cmd = [sys.executable, "-I", "-B", f"scripts/{script}", *args]
         cp = subprocess.run(cmd, cwd=self.dir, capture_output=True, text=True, timeout=600)
-        res = StepResult(name, cmd[2:], cp.returncode, cp.stdout, cp.stderr)
+        os.utime(self.dir)                              # 還在用：不被 sweep 清掉
+        res = StepResult(name, cmd[2:], cp.returncode, sanitize(cp.stdout, self.dir), sanitize(cp.stderr, self.dir))
         self.log.append(res)
         return res
 
@@ -125,7 +230,29 @@ class Job:
         return self.must(self.run("接續上次檔案", "log_photo.py", "restore", os.path.basename(src), WORKBOOK), "接續失敗")
 
     # ---------- 第 2 步：收照片 ----------
-    def add_photos(self, files: list[tuple[str, bytes]]) -> StepResult:
+    def add_photos(self, files: list[tuple[str, bytes]], max_photos: int | None = None) -> StepResult:
+        """收件前先檢查：張數（含 zip 內）、總大小、每個檔都是開得起來的圖片；不合格就不寫入任何檔。"""
+        max_photos = MAX_PHOTOS if max_photos is None else max_photos
+        n = count_photos(files)
+        if n == 0:
+            raise PipelineError("沒有收到照片")
+        if max_photos and n > max_photos:
+            raise PipelineError(f"共 {n} 張，超過一次 {max_photos} 張的上限，請分批上傳")
+        total = 0
+        for name, data in files:
+            if name.lower().endswith(".zip"):
+                infos = _zip_images(data)
+                total += sum(i.file_size for i in infos)
+                if total > MAX_BYTES:
+                    raise PipelineError("照片總大小超過上限，請分批上傳")
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    for i in infos:
+                        _check_image(i.filename, z.read(i))
+            else:
+                total += len(data)
+                _check_image(name, data)
+        if total > MAX_BYTES:
+            raise PipelineError("照片總大小超過上限，請分批上傳")
         inc = self.p("incoming")
         os.makedirs(inc, exist_ok=True)
         for name, data in files:
@@ -173,18 +300,29 @@ class Job:
             return {}
         return dict(ln.rstrip("\n").split("：", 1) for ln in open(fpath, encoding="utf-8") if "：" in ln)
 
+    def draft(self, nnn: str) -> str:
+        """第 2 步文字框的預設內容：讀圖草稿，沒有就用空白範本。"""
+        return self.drafts.get(nnn) or self.template(nnn)
+
     def auto_read(self, reader) -> dict[str, list[str]]:
-        """讀圖後端逐張讀還沒寫入的照片，組成工作檔文字寫進 text/NNN.txt；回傳 {原檔名: 提醒}。讀不到的照片不寫（留給人工）。"""
+        """讀圖後端逐張讀還沒寫入的照片，組成工作檔文字放在草稿（self.drafts）；回傳 {原檔名: 提醒}。
+        草稿不寫進 text/NNN.txt：使用者在第 2 步勾選「我已看過」後才由 write_text 寫入
+        （2026-11-23 稽核 W2：草稿先落檔時，沒勾選的照片也會被 addmany 寫入）。一張失敗不影響其他張。"""
         notes = {}
         for r in self.manifest():
             if r["狀態"] == "done" or os.path.exists(self.p("text", f"{r['nnn']}.txt")):
                 continue
-            got = reader.read(self.p("photos", f"{r['nnn']}.jpg"), r["sha256"], r["原檔名"])
+            try:
+                got = reader.read(self.p("photos", f"{r['nnn']}.jpg"), r["sha256"], r["原檔名"])
+            except Exception:
+                notes[r["原檔名"]] = ["讀圖失敗，請人工抄寫"]
+                continue
             if got is None:
                 notes[r["原檔名"]] = ["讀圖沒有結果，請人工抄寫"]
                 continue
             exif = r["照片日期"] if r.get("exif時間") else ""
-            self.write_text(r["nnn"], rd.compose_text(got, exif), rd.fixed_of(got))
+            self.drafts[r["nnn"]] = rd.compose_text(got, exif)
+            self.draft_fixed[r["nnn"]] = rd.fixed_of(got)
             self.reads[r["sha256"]] = got
             notes[r["原檔名"]] = rd.warnings(got)
         return notes
@@ -208,14 +346,14 @@ class Job:
 
     def check_report(self) -> str:
         """每一步的命令、結束碼與輸出，跟 Excel 一起交（2026-11-22 稽核：交付物缺交檔檢查紀錄）。"""
-        src = f"本機 {os.environ['PHOTO_SKILL_DIR']}" if os.environ.get("PHOTO_SKILL_DIR") else f"miko {SKILL_COMMIT}"
+        src = skill_source()
         out = [f"材料自主檢查照片｜檢查紀錄｜Skill 來源：{src}", "腳本 SHA-256："] + [f"- {n}：{h}" for n, h in self.hashes.items()] + [""]
         for r in self.log:
             out += [f"## {r.name}（結束碼 {r.returncode}）", "$ " + " ".join(r.cmd), r.stdout.rstrip()]
             if r.stderr.strip():
                 out.append("stderr: " + r.stderr.rstrip())
             out.append("")
-        return "\n".join(out)
+        return sanitize("\n".join(out), self.dir)
 
     def addmany(self) -> StepResult:
         return self.must(self.run("寫入工作檔", "log_photo.py", "addmany", WORKBOOK), "寫入工作檔失敗")
