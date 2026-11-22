@@ -1,0 +1,6 @@
+streamlit>=1.40
+openpyxl>=3.1
+pillow>=10
+pillow-heif>=0.16   # iPhone HEIC（log_photo.py 有則使用）
+anthropic>=0.40     # 只有設定 ANTHROPIC_API_KEY 才會用到（讀圖費用待 MIKO 最後決定）
+pytest>=8
