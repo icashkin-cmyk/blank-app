@@ -369,3 +369,33 @@ def test_access_policy():
     assert pl.paid_reading_allowed(allowed={"a@example.com"}, daily=20) is True
     assert pl.paid_reading_allowed(allowed={"a@example.com"}, daily=0) is False
     assert pl.paid_reading_allowed(allowed=set(), daily=20) is False
+
+
+# ---------- 2026-11-23 網頁第三輪獨立稽核的重現測試 ----------
+def test_usage_refund(tmp_path):
+    """稽核：收件失敗或照片重複時要把預扣的用量退回，不得白扣。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    assert u.try_add("a@example.com", 4, limit=5)
+    u.refund("a@example.com", 3)
+    assert u.used("a@example.com") == 1
+    u.refund("a@example.com", 99)
+    assert u.used("a@example.com") == 0                            # 不會退成負數
+
+
+def test_parse_daily_limit():
+    """稽核建議：每日上限設成非數字或負數時，回報設定錯誤而不是整頁壞掉或擋住所有人。"""
+    assert pl.parse_daily(None) == (0, "") and pl.parse_daily("20") == (20, "")
+    assert pl.parse_daily("abc")[1] and pl.parse_daily("-1")[1]
+
+
+def test_heic_accepted(job):
+    """稽核：裝了 pillow-heif 的正式環境，HEIC 不得在收件時被當成「不是圖片」拒收。"""
+    pillow_heif = pytest.importorskip("pillow_heif")
+    pillow_heif.register_heif_opener()
+    b = io.BytesIO()
+    Image.new("RGB", (640, 480), (200, 200, 190)).save(b, "HEIF")
+    import subprocess
+    code = ("import sys, io; sys.path.insert(0, %r); import pipeline as pl; "
+            "pl._check_image('IMG_0001.HEIC', sys.stdin.buffer.read()); print('ok')" % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    cp = subprocess.run([sys.executable, "-c", code], input=b.getvalue(), capture_output=True)   # 新行程：不受本測試註冊的影響
+    assert cp.stdout.strip() == b"ok", cp.stderr.decode()[-300:]

@@ -33,6 +33,8 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
 ## 限制
 - 一次 20 張以內（`pipeline.MAX_PHOTOS`，zip 裡的也算，篩選條件與 Skill 的 `prep` 相同）、解開後總大小 300MB 以內、單張 8000 萬像素以內；巢狀 zip 不處理；副檔名是圖片但內容打不開的檔會在收件時擋下。
 - 同名檔案會互相覆蓋，上傳前請確認檔名不同。
+- 接續上次的 xlsx 時，照片與原文會帶回來；第 4 步手動改過的欄位（含讀圖建議的檢查項目）不會帶回，要再確認一次。
+- 每日上限：收件失敗或重複的照片不算；`PHOTO_DAILY_LIMIT` 不是數字或是負數時頁面會顯示設定錯誤。未預期的錯誤細節只寫在伺服器紀錄。
 - PDF 預覽需要環境裝有 LibreOffice；雲端沒有新細明體、標楷體時，PDF 的欄寬與字型和電腦版 Excel 不同，只供抽看。
 - 每日用量記在暫存資料夾，容器重啟會歸零；沒登入的人以工作階段計，換瀏覽器就重算，所以要控管費用請設使用者名單。
 - 工作資料夾在 `<暫存>/photo_web_jobs/`：按「結束並刪除暫存」立即刪除；沒按時，閒置超過 2 小時後，在下一次有人開啟頁面時清除（沒有人開頁面就不會清；頁面開著並持續操作的工作不會被清）。
@@ -50,7 +52,7 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
    ```
    金鑰與上列密鑰只填在平台的 Secrets，不寫進 repo。
-4. 在 App 設定關掉工具列與錯誤細節：`client.toolbarMode = "viewer"`、`client.showErrorDetails = "none"`（`false` 仍會顯示堆疊）。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
+4. 關掉工具列與錯誤細節：Streamlit Community Cloud 沒有設定畫面，要在 repo 根目錄加 `.streamlit/config.toml`，內容是 `[client]` 區段的 `toolbarMode = "viewer"` 與 `showErrorDetails = "none"`（`false` 仍會顯示堆疊）。這個檔會同時影響同一個 repo 的其他 Streamlit 頁面，所以本 repo 目前沒有加，由部署的人決定。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
 
 ## 執行與測試
 ```

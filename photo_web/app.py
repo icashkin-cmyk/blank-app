@@ -1,6 +1,7 @@
 """photo_web/app.py｜上傳照片 → 讀圖草稿逐張核對 → 既有腳本產出「材料自主檢查照片.xlsx」。
 執行：streamlit run photo_web/app.py
 讀圖（reader.py）有固定答案、Claude API、人工抄寫三種；規則照 photo-inspection-log SKILL.md。"""
+import logging
 import os
 import sys
 
@@ -18,7 +19,8 @@ except Exception:
 st.title("材料自主檢查照片產生器")
 HOURS = pl.JOB_MAX_AGE_S // 3600
 PRIVACY = (f"照片只存在本次工作的暫存資料夾：按左側「結束並刪除暫存」立即刪除；沒按的話，"
-           f"閒置超過 {HOURS} 小時後，在下一次有人開啟這個網頁時清除。")
+           f"閒置超過 {HOURS} 小時後，在下一次有人開啟這個網頁時清除。（手機請點左上角展開側欄。）"
+           "有設每日上限時，登入者的 email 與當日張數會記到隔天。")
 st.caption(f"依 photo-inspection-log 既有腳本產出公司格式 Excel。腳本版本：{pl.skill_source()}。" + PRIVACY)
 pl.sweep()
 
@@ -60,7 +62,8 @@ def guard(fn, *a, **k):
         if S.stage == "upload":                           # 收件階段失敗：不留下半成品資料夾
             reset()
         st.stop()
-    except Exception as e:                                # 其他例外：不顯示路徑與堆疊
+    except Exception as e:                                # 其他例外：不顯示路徑與堆疊（細節寫進伺服器紀錄）
+        logging.exception("photo_web 未預期的錯誤")
         st.error(f"發生未預期的錯誤（{e.__class__.__name__}），這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")
         if S.stage == "upload":
             reset()
@@ -70,7 +73,9 @@ def guard(fn, *a, **k):
 def reset():
     if S.job:
         S.job.cleanup()
-    S.job, S.stage = None, "upload"
+    if S.get("reserved"):                                 # 收件沒完成：退回預扣的每日用量
+        USAGE.refund(*S.reserved)
+    S.job, S.stage, S.reserved, S.pdf = None, "upload", None, None
 
 
 with st.sidebar:
@@ -88,13 +93,16 @@ with st.sidebar:
 
 # ---------- 使用權限與用量（給外人使用時）----------
 RESTRICTED, ALLOWED = pl.parse_allowed(os.environ.get("PHOTO_ALLOWED_EMAILS"))
-DAILY = int(os.environ.get("PHOTO_DAILY_LIMIT", "0") or 0)   # 每人每日張數上限；0＝不限
+DAILY, DAILY_ERR = pl.parse_daily(os.environ.get("PHOTO_DAILY_LIMIT"))   # 每人每日張數上限；0＝不限
+if DAILY_ERR:
+    st.error(DAILY_ERR)
+    st.stop()
 USAGE = pl.Usage()
 
 
 def email() -> str:
     try:
-        if not st.user.is_logged_in or st.user.get("email_verified", True) is False:
+        if not st.user.is_logged_in or str(st.user.get("email_verified", True)).lower() == "false":
             return ""
         return (st.user.email or "").lower()
     except Exception:
@@ -155,6 +163,7 @@ def page():
                 st.error(f"共 {n_photos} 張，超過一次 {pl.MAX_PHOTOS} 張的上限，請分批上傳。"); st.stop()
             if DAILY and not USAGE.try_add(user_key(), n_photos, DAILY):   # 檢查與累加在同一個鎖裡
                 st.error(f"超過每日上限 {DAILY} 張，請明天再傳或減少張數。"); st.stop()
+            S.reserved = (user_key(), n_photos) if DAILY else None     # 預扣；收件失敗由 reset() 退回
             if S.job:                                         # 上一個沒結束的工作：先清掉
                 S.job.cleanup()
             S.job = guard(lambda: pl.Job(scripts_src=scripts_cache()))
@@ -164,6 +173,9 @@ def page():
             guard(S.job.add_photos, files)
             if not S.job.stopped() and not prev:
                 st.warning("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。"); reset(); st.stop()
+            if S.reserved:                                    # 只算實際新增的張數（重複的不算）
+                USAGE.refund(S.reserved[0], S.reserved[1] - len(S.job.stopped()))
+                S.reserved = None
             if READER:
                 with st.spinner(f"讀圖中（{READER.name}）…"):
                     S.notes = S.job.auto_read(READER)
@@ -280,12 +292,13 @@ def page():
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.download_button("下載 交檔檢查紀錄.txt", job.check_report().encode("utf-8"), file_name="交檔檢查紀錄.txt", mime="text/plain")
         if st.button("產生 PDF 預覽"):
-            pdf = job.to_pdf()
-            if pdf:
-                st.download_button("下載 PDF 預覽", pdf, file_name="材料自主檢查照片.pdf", mime="application/pdf")
-            else:
-                st.warning("這個環境沒有 LibreOffice，無法轉 PDF。")
-        st.caption("下次接續請上傳這次的材料自主檢查照片.xlsx。")
+            S.pdf = job.to_pdf() or b""
+        if S.get("pdf"):                                  # 放在工作階段裡：按下載後頁面重跑，按鈕還在
+            st.download_button("下載 PDF 預覽", S.pdf, file_name="材料自主檢查照片.pdf", mime="application/pdf")
+        elif S.get("pdf") == b"":
+            st.warning("這個環境沒有 LibreOffice，無法轉 PDF。")
+        st.caption("下次接續請上傳這次的材料自主檢查照片.xlsx。接續時照片與原文會帶回來；"
+               "第 4 步手動改過的欄位不會帶回，需要再確認一次。")
 
 
 try:
@@ -293,4 +306,7 @@ try:
 except pl.PipelineError as e:
     st.error(str(e))
 except Exception as e:  # 未預期的錯誤：不顯示路徑與堆疊（st.stop／st.rerun 不是 Exception，不會被攔）
+    logging.exception("photo_web 未預期的錯誤")
+    if S.stage == "upload":
+        reset()
     st.error(f"發生未預期的錯誤（{e.__class__.__name__}），這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")

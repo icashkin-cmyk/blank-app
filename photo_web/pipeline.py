@@ -27,6 +27,12 @@ from openpyxl import load_workbook
 
 import reader as rd
 
+try:                                 # iPhone HEIC：收件檢查也要能開（log_photo.py 自己也註冊；沒註冊時裝了 pillow-heif 反而全部被拒）
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pillow_heif = None
+
 # 網頁鎖定的 Skill 版本（miko main）。這個 commit 是舊版腳本；photo-inspection-log v0.23 合併進 main 後要改成新的 commit（見 README）。
 SKILL_COMMIT = "a79ddfde2c7eaaaad8da9ada9e0ef15ccfb70a6e"
 SKILL_FILES = ["log_photo.py", "build_company.py", "make_entries.py", "preflight.py", "forms.csv", "材料自主檢查照片_範本.xlsx"]
@@ -109,11 +115,8 @@ def _check_image(name: str, data: bytes) -> None:
     except PipelineError:
         raise
     except Exception as e:
-        if name.lower().endswith((".heic", ".heif")):
-            try:
-                import pillow_heif  # noqa: F401
-            except ImportError:
-                return
+        if name.lower().endswith((".heic", ".heif")) and pillow_heif is None:
+            return                   # 沒有解碼器的環境：內容交給既有腳本處理
         raise PipelineError(f"「{os.path.basename(name)}」不是可以開啟的圖片，請移除後重新上傳") from e
 
 
@@ -127,7 +130,7 @@ def sanitize(text: str, job_dir: str = "") -> str:
         if path:
             text = text.replace(path, label)
     text = re.sub(r"/(?:[\w.+-]+/)+(?:site-packages|dist-packages|lib/python[\d.]+)(?:/[\w.+-]+)*", "<系統>", text)
-    return re.sub(r"(?<![\w<>.])/(?:home|tmp|usr|opt|var|srv|app|mount|mnt|root|workspace|private|Users)(?:/[\w.+@~-]+)+", "<路徑>", text)
+    return re.sub(r"(?<![\w<>.])/(?:home|tmp|usr|opt|var|srv|app|mount|mnt|root|workspace|private|Users|etc|data|proc|nix)(?:/[\w.+@~-]+)+", "<路徑>", text)
 
 
 def sweep(root: str = "", max_age_s: int = JOB_MAX_AGE_S) -> int:
@@ -175,6 +178,22 @@ class Usage:
 
     def add(self, user: str, n: int) -> None:
         self.try_add(user, n, 0)
+
+    def refund(self, user: str, n: int) -> None:
+        """退回預扣的張數（收件失敗、重複照片）；不會退成負數。"""
+        if n > 0:
+            self.try_add(user, -min(n, self.used(user)), 0)
+
+
+def parse_daily(raw: str | None) -> tuple[int, str]:
+    """PHOTO_DAILY_LIMIT → (上限, 錯誤訊息)。空的＝0 不限；非數字或負數回報設定錯誤。"""
+    if raw is None or not raw.strip():
+        return 0, ""
+    try:
+        n = int(raw.strip())
+    except ValueError:
+        return 0, "每日上限（PHOTO_DAILY_LIMIT）不是數字，請管理者修正。"
+    return (n, "") if n >= 0 else (0, "每日上限（PHOTO_DAILY_LIMIT）不能是負數，請管理者修正。")
 
 
 def parse_allowed(raw: str | None) -> tuple[bool, set[str]]:
