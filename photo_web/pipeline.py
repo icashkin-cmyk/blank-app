@@ -30,7 +30,7 @@ import reader as rd
 try:                                 # iPhone HEIC：收件檢查也要能開（log_photo.py 自己也註冊；沒註冊時裝了 pillow-heif 反而全部被拒）
     import pillow_heif
     pillow_heif.register_heif_opener()
-except ImportError:
+except Exception:                    # 沒裝，或底層函式庫壞掉：當成沒有解碼器，不讓整頁起不來
     pillow_heif = None
 
 # 網頁鎖定的 Skill 版本（miko main）。這個 commit 是舊版腳本；photo-inspection-log v0.23 合併進 main 後要改成新的 commit（見 README）。
@@ -240,11 +240,17 @@ class Job:
         self.scripts = os.path.join(self.dir, "scripts")
         self.log: list[StepResult] = []
         self.reads: dict[str, rd.PhotoRead] = {}   # sha256 → 讀圖結果（建議欄位用）
-        if scripts_src:  # 已下載好的快取資料夾
-            shutil.copytree(scripts_src, self.scripts)
-            self.hashes = {n: sha256_bytes(open(os.path.join(self.scripts, n), "rb").read()) for n in SKILL_FILES}
-        else:
-            self.hashes = fetch_scripts(self.scripts)
+        try:
+            if scripts_src:  # 已下載好的快取資料夾
+                shutil.copytree(scripts_src, self.scripts)
+                self.hashes = {n: sha256_bytes(open(os.path.join(self.scripts, n), "rb").read()) for n in SKILL_FILES}
+            else:
+                self.hashes = fetch_scripts(self.scripts)
+        except Exception as e:           # 腳本來源缺檔：不留下空殼資料夾
+            shutil.rmtree(self.dir, ignore_errors=True)
+            if isinstance(e, PipelineError):
+                raise
+            raise PipelineError("Skill 腳本不完整，無法開始（Skill 必須整包使用），請通知管理者。") from e
 
     # ---------- 共用 ----------
     def p(self, *parts: str) -> str:

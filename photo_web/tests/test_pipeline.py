@@ -399,3 +399,13 @@ def test_heic_accepted(job):
             "pl._check_image('IMG_0001.HEIC', sys.stdin.buffer.read()); print('ok')" % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     cp = subprocess.run([sys.executable, "-c", code], input=b.getvalue(), capture_output=True)   # 新行程：不受本測試註冊的影響
     assert cp.stdout.strip() == b"ok", cp.stderr.decode()[-300:]
+
+
+# ---------- 2026-11-23 網頁第四輪獨立稽核的重現測試 ----------
+def test_failed_job_creation_leaves_no_folder(tmp_path):
+    """稽核建議：腳本來源缺檔時，建立工作失敗不得留下空殼資料夾。"""
+    root, empty = tmp_path / "jobs", tmp_path / "noscripts"
+    empty.mkdir()
+    with pytest.raises(Exception):
+        pl.Job(root=str(root), scripts_src=str(empty))
+    assert not root.exists() or os.listdir(root) == []
