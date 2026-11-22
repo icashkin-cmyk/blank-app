@@ -190,8 +190,9 @@ class Job:
         return notes
 
     def apply_suggestions(self, entries: list[dict]) -> list[dict]:
-        """照片沒有「查驗項目」欄時，用讀圖的建議品名當檢查項目；量測讀數行搬到實測值；意象描述不放進設計/標準值。
-        只改 entries（給使用者在第 4 步確認），不改工作檔原文。"""
+        """照片沒有「查驗項目」欄時，用讀圖的建議品名當檢查項目；只改 entries（給使用者在第 4 步確認），不改工作檔原文。
+        意象描述保留在設計/標準值（2026-11-22 稽核：意象在 Excel 看不到）。量測讀數行由 make_entries v0.5 放進實測值；
+        舊版 make_entries（v0.4 以前）留在設計/標準值的量測讀數行，這裡搬到實測值，白板實測一併保留。"""
         where = {r["列號"]: r["sha256"] for r in self.manifest() if r.get("列號")}
         for e in entries:
             got = self.reads.get(where.get(f"{e['_sheet']}:{e['_row']}", ""))
@@ -199,11 +200,22 @@ class Job:
                 e["item"] = got.suggest_item
             elif e["item"].startswith(("—", "UNKNOWN")):
                 e["item"] = ""
-            meas = [ln[len("（量測讀數："):-1] for ln in e["design"] if ln.startswith("（量測讀數：")]
-            e["design"] = [ln for ln in e["design"] if not ln.startswith(("（量測讀數：", "（意象："))]
-            if meas and not e["measured"]:
-                e["measured"] = meas
+            meas = [ln[len("（量測讀數："):].removesuffix("）") for ln in e["design"] if ln.startswith("（量測讀數：")]
+            if meas:
+                e["design"] = [ln for ln in e["design"] if not ln.startswith("（量測讀數：")]
+                e["measured"] = [m for m in e["measured"] if not m.startswith("（量測讀數：")] + meas
         return entries
+
+    def check_report(self) -> str:
+        """每一步的命令、結束碼與輸出，跟 Excel 一起交（2026-11-22 稽核：交付物缺交檔檢查紀錄）。"""
+        src = f"本機 {os.environ['PHOTO_SKILL_DIR']}" if os.environ.get("PHOTO_SKILL_DIR") else f"miko {SKILL_COMMIT}"
+        out = [f"材料自主檢查照片｜檢查紀錄｜Skill 來源：{src}", "腳本 SHA-256："] + [f"- {n}：{h}" for n, h in self.hashes.items()] + [""]
+        for r in self.log:
+            out += [f"## {r.name}（結束碼 {r.returncode}）", "$ " + " ".join(r.cmd), r.stdout.rstrip()]
+            if r.stderr.strip():
+                out.append("stderr: " + r.stderr.rstrip())
+            out.append("")
+        return "\n".join(out)
 
     def addmany(self) -> StepResult:
         return self.must(self.run("寫入工作檔", "log_photo.py", "addmany", WORKBOOK), "寫入工作檔失敗")

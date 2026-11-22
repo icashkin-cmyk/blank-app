@@ -57,7 +57,7 @@ def test_end_to_end_four_photos(job):
     assert [r[0] for r in job.pending_base()] == ["工程名稱"]
     job.confirm_base(["--all"])
     assert job.pending_base() == []
-    assert job.items() == ["EMT管"]
+    assert job.items() == ["EMT導線管"]  # make_entries v0.5：檢查項目用材料表名稱
     job.set_sub("EMT管材料進場", "〈分項工程〉")
     entries = job.make_entries()
     assert len(entries) == 4 and all(e["sec"] == "〈分項工程〉" for e in entries)
@@ -170,13 +170,30 @@ def test_fixture13_end_to_end(job):
     entries = job.apply_suggestions(job.make_entries())
     assert len(entries) == 11
     assert not any(e["item"].startswith("—") for e in entries)
-    assert not any(ln.startswith("（意象：") for e in entries for ln in e["design"])
+    # 2026-11-22 獨立稽核後的驗收（AC3／AC6／AC7 與稽核問題 1～6）
+    alld = [ln for e in entries for ln in e["design"]]
+    assert sum(ln.startswith("（意象：") for ln in alld) == 9          # 意象保留在設計/標準值（11 張有 9 張有描述）
+    assert not any(ln.startswith("（意象：") for e in entries for ln in e["measured"])
+    emt = [e for e in entries if "EMT" in " ".join(e["design"] + [e["item"]])]
+    assert len(emt) == 3 and all(e["item"] == "EMT導線管" for e in emt)   # 檢查項目用材料表名稱
+    assert all(not any("｜" in ln for ln in e["design"]) and e["measured"] for e in emt)   # 實測欄不併進設計
+    assert sum(any("讀數：" in m for m in e["measured"]) for e in emt) == 2   # 兩張量測照讀數進實測值
+    assert not any(ln.startswith("（量測讀數：") for ln in alld)
+    import re as _re
+    for must in ("軟水管龍頭 LF6450N6", "$ 799", r"面盆 L33〔\?\d+〕", r"明鏡 BA18〔\?\d+〕0", r"LF11〔\?\d+〕4P"):  # 不截行、看不清寫〔?N〕
+        assert any(_re.search(must.replace("$", r"\$"), ln) for ln in alld), must
+    assert any(m.endswith("（管端刻度看不清）") for e in emt for m in e["measured"])
     job.save_entries(entries)
     job.build()
     res = job.preflight_deliver()
     assert "交檔結果：全部 PASS" in res.stdout
     wb = load_workbook(job.p(pl.OUTPUT))
     assert len(wb.active._images) == 11
+    from PIL import Image as PI
+    import io as _io
+    for im in wb.active._images:                                        # 照片不變形：等比補白成照片格比例
+        w, h = PI.open(_io.BytesIO(im._data())).size
+        assert abs(w / h - 2875930 / 2156190) < 0.02, (w, h)
     open(os.path.join(os.environ.get("PHOTO_OUT_DIR", job.dir), pl.OUTPUT), "wb").write(job.output_bytes())
 
 

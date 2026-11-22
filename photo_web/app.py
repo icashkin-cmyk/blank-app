@@ -229,6 +229,7 @@ if S.stage == "done":
     st.success("交檔檢查全部 PASS。")
     st.download_button("下載 材料自主檢查照片.xlsx", job.output_bytes(), file_name=pl.OUTPUT, type="primary",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("下載 交檔檢查紀錄.txt", job.check_report().encode("utf-8"), file_name="交檔檢查紀錄.txt", mime="text/plain")
     if st.button("產生 PDF 預覽"):
         pdf = job.to_pdf()
         if pdf:
