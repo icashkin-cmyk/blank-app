@@ -20,7 +20,7 @@ st.title("材料自主檢查照片產生器")
 HOURS = pl.JOB_MAX_AGE_S // 3600
 PRIVACY = (f"照片只存在本次工作的暫存資料夾：按左側「結束並刪除暫存」立即刪除；沒按的話，"
            f"閒置超過 {HOURS} 小時後，在下一次有人開啟這個網頁時清除。（手機請點左上角展開側欄。）"
-           "有設每日上限時，登入者的 email 與當日張數會記到隔天。")
+           "有設每日上限時，登入者的 email 與當日張數會記在伺服器，隔天起有人開啟這個網頁時清除。")
 LIMIT_NOTE = "處理中請不要重新整理或更換檔案；中斷時沒用到的額度會退回，已送出讀圖的張數仍計入。"
 st.caption(f"依 photo-inspection-log 既有腳本產出公司格式 Excel。腳本版本：{pl.skill_source()}。" + PRIVACY)
 
@@ -48,6 +48,7 @@ if S.job and S.stage == "upload":                     # 上一輪收件或讀圖
     S.job.abandon(USAGE); S.job = None
 if S.job:
     S.job.touch()
+USAGE.prune()                                         # 舊日期的用量（含 email）開頁就清
 pl.recover(USAGE)                                     # 別的工作階段中斷留下的預扣（處理中重新整理、斷線）：退回並清掉
 pl.sweep()
 
@@ -185,7 +186,9 @@ def page():
                 if DAILY and not guard_upload(S.job.reserve, USAGE, user_key(), n_photos, DAILY):   # 檢查與累加在同一個鎖裡
                     wait = pl.pending_reserved(user_key())
                     fail_upload(f"超過每日上限 {DAILY} 張，請明天再傳或減少張數。"
-                                + (f"（另有 {wait} 張屬於還在處理或剛中斷的上傳，約一分鐘內會退回，可稍後再試。）" if wait else ""))
+                                + (f"（另有 {wait} 張屬於還在處理或剛中斷的上傳，那一批停下後會退回，請稍後再試。）" if wait else ""))
+                if not DAILY:
+                    S.job.begin()                             # 沒設上限也留「處理中」紀錄，中斷後才清得掉
                 bar = st.progress(0.0, text="收件中…")
                 guard_upload(S.job.preflight_start)
                 if prev:

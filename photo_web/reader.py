@@ -183,7 +183,7 @@ class ClaudeReader:
 
     def __init__(self, model: str | None = None):
         import anthropic  # 延後載入：沒裝 SDK 也能跑其他部分
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(timeout=120.0, max_retries=1)   # 一張卡住最久約 4 分鐘就改人工，不長時間占住處理鎖
         self.model = model or os.environ.get("PHOTO_READER_MODEL", "claude-opus-5-5")
 
     def read(self, image_path: str, sha256: str, original_name: str) -> PhotoRead | None:

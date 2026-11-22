@@ -176,6 +176,18 @@ class Usage:
             json.dump(d, open(tmp, "w", encoding="utf-8")); os.replace(tmp, self.path)
             return True
 
+    def prune(self) -> None:
+        """清掉不是今天的紀錄（含 email）。每次開頁呼叫，不必等到有人上傳。"""
+        import fcntl
+        today = str(datetime.date.today())
+        if all(k.startswith(today) for k in self._load()):
+            return
+        with open(self.path + ".lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            d = {k: v for k, v in self._load().items() if k.startswith(today)}
+            tmp = self.path + ".tmp"
+            json.dump(d, open(tmp, "w", encoding="utf-8")); os.replace(tmp, self.path)
+
     def add(self, user: str, n: int) -> None:
         self.try_add(user, n, 0)
 
@@ -240,7 +252,7 @@ def claim_reservation(folder: str) -> dict | None:
 
 def _refund_unspent(usage: "Usage", r: dict) -> None:
     """退回沒結清的預扣；已送去付費讀圖的張數（spent）照算，不退。隔天的紀錄不退（用量已歸零）。"""
-    if not r.get("settled") and r.get("date") == str(datetime.date.today()):
+    if r.get("user") and not r.get("settled") and r.get("date") == str(datetime.date.today()):
         usage.refund(r["user"], int(r["n"]) - int(r.get("spent", 0)))
 
 
@@ -352,6 +364,10 @@ class Job:
         self._save_reservation({"user": user, "n": n, "date": str(datetime.date.today()), "settled": False, "spent": 0})
         return True
 
+    def begin(self) -> None:
+        """沒設每日上限時也留一筆「處理中」紀錄（不記使用者、不動用量）：中斷後 recover() 才認得、清得掉（第六輪稽核 M1）。"""
+        self._save_reservation({"user": "", "n": 0, "date": str(datetime.date.today()), "settled": False, "spent": 0})
+
     def _save_reservation(self, r: dict) -> None:
         tmp = self.p("reserve.tmp")
         json.dump(r, open(tmp, "w", encoding="utf-8")); os.replace(tmp, self.p("reserve.json"))
@@ -362,7 +378,7 @@ class Job:
     def _spend(self) -> None:
         """付費讀圖每送出一張就記一筆：之後中斷，這幾張照算不退。"""
         r = self._reservation()
-        if r and not r.get("settled"):
+        if r and not r.get("settled") and r.get("user"):
             r["spent"] = int(r.get("spent", 0)) + 1
             self._save_reservation(r)
 
@@ -378,7 +394,8 @@ class Job:
         if not r or r.get("settled"):
             return
         actual = max(actual, int(r.get("spent", 0)))           # 已付費讀過的張數不會少算
-        usage.refund(r["user"], int(r["n"]) - actual)
+        if r.get("user"):
+            usage.refund(r["user"], int(r["n"]) - actual)
         r.update(n=actual, settled=True)
         self._save_reservation(r)
 

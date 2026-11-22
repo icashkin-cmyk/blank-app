@@ -1,7 +1,9 @@
 """S1 端到端測試：合成照片（不含任何真實工地資料）→ 既有腳本 → 材料自主檢查照片.xlsx。
 執行：PHOTO_SKILL_DIR=<miko>/skills/photo-inspection-log/scripts python3 -m pytest -q photo_web/tests
 沒設 PHOTO_SKILL_DIR 時從 GitHub 固定 commit 下載腳本（需要網路）。"""
+import datetime
 import io
+import json
 import os
 import sys
 
@@ -501,3 +503,44 @@ def test_refund_happens_only_once(tmp_path):
     assert r and r["n"] == 5 and j1._claim() is None           # 第二次拿不到
     assert pl.pending_reserved("a@example.com", str(tmp_path)) == 4
     j1.cleanup(); j2.abandon(u)
+
+
+# ---------- 2026-11-23 網頁第六輪獨立稽核 ----------
+def test_interrupted_job_without_daily_limit_is_cleaned(tmp_path):
+    """稽核 M1：沒設每日上限時，處理中斷的工作資料夾（含照片）也要在下一次開頁時清掉。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        j.begin()
+        assert pl.recover(u, str(tmp_path)) == 0               # 處理中不動
+    assert pl.recover(u, str(tmp_path)) == 1 and not os.path.exists(j.dir)
+    assert u._load() == {}                                     # 沒設上限：不記任何人的用量
+
+
+def test_finished_job_without_daily_limit_is_kept(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        j.begin(); j.settle(u, 3)
+    assert pl.recover(u, str(tmp_path)) == 0 and os.path.exists(j.dir) and u._load() == {}
+    j.cleanup()
+
+
+def test_settle_never_charges_less_than_paid_reads(tmp_path):
+    """稽核 S1：結清時已付費讀過的張數不能少算。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    j.reserve(u, "a@example.com", 5, limit=20)
+    j._spend(); j._spend(); j._spend()
+    j.settle(u, 1)
+    assert u.used("a@example.com") == 3
+    j.cleanup()
+
+
+def test_prune_drops_old_days(tmp_path):
+    """稽核 S3：舊日期的用量（含 email）在開頁時就清掉，不等到有人上傳。"""
+    path = tmp_path / "usage.json"
+    path.write_text(json.dumps({"2000-01-01|old@example.com": 5, f"{datetime.date.today()}|a@example.com": 2}), encoding="utf-8")
+    u = pl.Usage(str(path))
+    u.prune()
+    assert u._load() == {f"{datetime.date.today()}|a@example.com": 2}
