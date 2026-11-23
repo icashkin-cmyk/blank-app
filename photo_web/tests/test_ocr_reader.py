@@ -210,11 +210,13 @@ def test_empty_label_does_not_take_next_label_as_value():
 
 
 def test_simplified_words_become_traditional():
-    """MIKO 2026-11-23 回報「還有簡體字」：逐字轉換會漏掉一字多義的字（制、范、里、后、云、几、余），要照詞轉。"""
+    """MIKO 2026-11-23 回報「還有簡體字」：只會是簡體的字都要轉；型號、數字、〔?〕不動。"""
     pytest.importorskip("opencc")
-    assert oc.to_trad("规范 制造 这里 后面 云端 几个 剩余 范围 检查项目 材料进场") == "規範 製造 這裡 後面 雲端 幾個 剩餘 範圍 檢查項目 材料進場"
+    assert oc.to_trad("检查项目 材料进场 厂牌 灯具 发电机 配电柜 开关 电线 数量 规格 型号 长度 镀锌钢管 灭火器 紧急广播 3个 气体 网路") == \
+        "檢查項目 材料進場 廠牌 燈具 發電機 配電柜 開關 電線 數量 規格 型號 長度 鍍鋅鋼管 滅火器 緊急廣播 3個 氣體 網路"
     assert oc.to_trad("台南 台电 3台 面板 系统 松木 表面") == "台南 台電 3台 面板 系統 松木 表面"   # 「台」不改成「臺」；本來就對的字不動
     assert oc.to_trad("AB-123 25W 5.5mm²〔?〕") == "AB-123 25W 5.5mm²〔?〕"
+    assert oc.to_trad("") == ""
 
 
 def test_traditional_words_are_never_rewritten():
@@ -224,5 +226,10 @@ def test_traditional_words_are_never_rewritten():
             "水表", "公厘", "面板", "系統", "松木", "表面", "乾燥", "公里", "制水閥", "範圍", "斗", "后", "里", "干", "余", "范", "云", "几",
             "茶几", "控制箱", "台電", "PVC管 4\"(100mm)", "E19 符合CNS2606"]
     assert [w for w in keep if oc.to_trad(w) != w] == []
-    assert oc.to_trad("规范 制造 这里 后面 云端 几个 剩余 范围 检查项目 材料进场") == "規範 製造 這裡 後面 雲端 幾個 剩餘 範圍 檢查項目 材料進場"
+    # 稽核第 4 輪：跨詞、人名、姓氏後面接簡體字，都不得改到繁體也在用的字；只轉只會是簡體的字
+    names = ["管制作業", "交通管制作業", "控制作動", "管制品", "公里面積", "皇后面前", "王志杰", "林志杰", "胡适", "柜台", "李宁", "种師道", "杰出"]
+    assert [w for w in names if oc.to_trad(w) != w] == []
+    assert oc.to_trad("范国昌建築師事務所") == "范國昌建築師事務所" and oc.to_trad("余国华") == "余國華"
+    assert oc.to_trad("于国栋") == "于國棟" and oc.to_trad("涂庆文") == "涂慶文"
+    assert oc.to_trad("规范 这里 后面 制造") == "規范 這里 后面 制造"          # 已揭露的限制：這類字留著，由使用者在確認頁改
     assert oc.to_trad("掛式便斗 规格") == "掛式便斗 規格" and oc.to_trad("污排水管材料进场") == "污排水管材料進場"   # 同一格裡混著簡體字也不改壞
