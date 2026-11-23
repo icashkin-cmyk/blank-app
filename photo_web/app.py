@@ -204,7 +204,8 @@ def page():
                 guard_upload(S.job.preflight_start)
                 if prev:
                     guard_upload(S.job.restore, prev.name, prev.getvalue())
-                guard_upload(S.job.add_photos, files)
+                added = guard_upload(S.job.add_photos, files)
+                S.add_note = next((ln for ln in added.stdout.splitlines() if ln.startswith("OK 新增")), "")
                 if not S.job.stopped() and not prev:
                     fail_upload("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。")
                 if READER:
@@ -226,7 +227,7 @@ def page():
                     "看不清的留〔?〕（Excel 會標成待確認）。每張看過後打勾，或用「全選」。")
         else:
             st.info("只寫照片上看得到的字；看不清寫〔?〕。前兩行必須是「查驗時間：」「照片日期：」。每張看過後打勾，或用「全選」。")
-        st.caption(f"讀字方式：{how}")
+        st.caption(f"讀字方式：{how}" + (f"｜收件：{S.add_note.removeprefix('OK ')}" if S.get("add_note") else ""))
         if S.get("review_err"):
             st.error(S.pop("review_err"))
         if todo:
