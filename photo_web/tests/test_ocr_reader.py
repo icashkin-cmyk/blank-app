@@ -152,8 +152,8 @@ def test_fixed_for_only_photos_that_show_the_field(tmp_path):
     """反向：照片上讀不到工程名稱的那一張（例如價格牌）不帶入工程名稱。"""
     j = _job_with(tmp_path, {"001": {"工程名稱": "〈甲錯字〉", "監造單位": ""}, "002": {}})
     ok = {"工程名稱": "〈甲〉", "監造單位": "〈乙〉", "承造單位": ""}
-    assert j.fixed_for("001", ok) == {"工程名稱": "〈甲〉"}
-    assert j.fixed_for("002", ok) == {}
+    assert j.fixed_for("001", ok) == {"工程名稱": "〈甲〉", "監造單位": "〈乙〉"}
+    assert j.fixed_for("002", ok) == {"監造單位": "〈乙〉"}          # 整批都沒讀到、使用者補填的欄位每張都寫（稽核第 1 輪必修 3）；工程名稱仍不帶入
     j.draft_fixed = {}                                           # 人工抄寫：沒有讀圖草稿，使用者填的值每張都用
     assert j.fixed_for("002", ok) == ok
     j.cleanup()
@@ -198,3 +198,11 @@ def test_real_photos_end_to_end(tmp_path):
     assert "交檔結果：全部 PASS" in j.preflight_deliver().stdout
     assert len(load_workbook(j.p(pl.OUTPUT)).active._images) == n
     j.cleanup()
+
+
+def test_empty_label_does_not_take_next_label_as_value():
+    """稽核第 1 輪建議 1：檢查人員空白時，不得把右邊的「查驗日期：115.11.23」當成檢查人員。"""
+    bx = [b for b in board() if b.text not in ("〈人名〉", "查驗日期：", "115.11.23")]
+    bx.append(B(700, 560, 1040, 595, "查驗日期：115.11.23", 0.97))
+    r = oc.compose(bx, W, H)
+    assert r.inspector == "" and r.inspect_date == "115.11.23"

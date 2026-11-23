@@ -33,7 +33,7 @@ try:                                 # iPhone HEIC：收件檢查也要能開（
 except Exception:                    # 沒裝，或底層函式庫壞掉：當成沒有解碼器，不讓整頁起不來
     pillow_heif = None
 
-# 網頁鎖定的 Skill 版本（miko main）。這個 commit 是舊版腳本；photo-inspection-log v0.23 合併進 main 後要改成新的 commit（見 README）。
+# 網頁鎖定的 Skill 版本。這個 commit 是 photo-inspection-log v0.23 稽核版（miko PR 分支，尚未合併）；合併進 main 後要改成 main 的 commit（見 README）。
 SKILL_COMMIT = "6b95d8b455a825e4ed8116e6d2f62020c225cae1"
 SKILL_FILES = ["log_photo.py", "build_company.py", "make_entries.py", "preflight.py", "forms.csv", "材料自主檢查照片_範本.xlsx"]
 RAW_URL = "https://raw.githubusercontent.com/icashkin-cmyk/miko/{commit}/skills/photo-inspection-log/scripts/{name}"
@@ -41,6 +41,9 @@ WORKBOOK = "照片紀錄.xlsx"
 OUTPUT = "材料自主檢查照片.xlsx"
 TEXT_FIELDS = ["查驗時間", "照片日期", "查驗項目", "位置", "檢查人員"]
 FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
+Q_MARK = "〔?〕"
+MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
+MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
 
 
 def skill_source() -> str:
@@ -131,6 +134,11 @@ def sanitize(text: str, job_dir: str = "") -> str:
             text = text.replace(path, label)
     text = re.sub(r"/(?:[\w.+-]+/)+(?:site-packages|dist-packages|lib/python[\d.]+)(?:/[\w.+-]+)*", "<系統>", text)
     return re.sub(r"(?<![\w<>.])/(?:home|tmp|usr|opt|var|srv|app|mount|mnt|root|workspace|private|Users|etc|data|proc|nix)(?:/[\w.+@~-]+)+", "<路徑>", text)
+
+
+def nth(line: str) -> str:
+    """腳本訊息裡的「未寫入：003（…」改成使用者看得懂的「第 3 張（…」。"""
+    return re.sub(r"^未寫入：(\d{3})", lambda m: f"第 {int(m.group(1))} 張", line)
 
 
 def sweep(root: str = "", max_age_s: int = JOB_MAX_AGE_S) -> int:
@@ -519,11 +527,49 @@ class Job:
 
     def fixed_for(self, nnn: str, confirmed: dict[str, str]) -> dict[str, str]:
         """這一張要寫入的固定欄位：使用者在確認頁確認過的整批值。
-        有讀圖草稿時，只給「這張照片上讀得到該欄」的照片（照片上沒有的欄位不帶入）；沒有讀圖（人工抄寫）時每張都用確認值。"""
+        有讀圖草稿時：這張照片上讀得到的欄位用確認值（照片上沒有、別張才有的欄位不帶入）；
+        整批沒有任何一張讀到的欄位，使用者自己補填的值每張都寫（2026-11-23 稽核：補填的值不得丟掉）。
+        沒有讀圖（人工抄寫）時每張都用確認值。"""
         if not self.draft_fixed:
             return dict(confirmed)
         mine = self.draft_fixed.get(nnn, {})
-        return {f: v for f, v in confirmed.items() if mine.get(f, "").strip()}
+        todo = {r["nnn"] for r in self.stopped()}
+        seen = {f for n, v in self.draft_fixed.items() if n in todo for f, x in v.items() if x and x.strip()}
+        return {f: v for f, v in confirmed.items() if mine.get(f, "").strip() or (f not in seen and v and v.strip())}
+
+    def fixed_mismatch(self, confirmed: dict[str, str]) -> dict[str, list[tuple[str, str]]]:
+        """哪幾張讀到的固定欄位和整批確認的值「差很多」（可能是別的工程的照片）：{nnn: [(欄位, 這張讀到的寫法)]}。
+        只差幾個字（讀錯字）不算；沒讀清楚（〔?〕）的寫法去掉標記後字數太少也不比。"""
+        import difflib
+        out: dict[str, list[tuple[str, str]]] = {}
+        todo = {r["nnn"] for r in self.stopped()}
+        for nnn, v in self.draft_fixed.items():
+            if nnn not in todo:
+                continue
+            for f in FIXED_FIELDS:
+                want = (confirmed.get(f) or "").replace(Q_MARK, "").strip()
+                got = (v.get(f) or "").replace(Q_MARK, "").strip()
+                if len(want) < 2 or len(got) < 2:
+                    continue
+                if difflib.SequenceMatcher(None, want, got).ratio() < MISMATCH_RATIO:
+                    out.setdefault(nnn, []).append((f, v[f].strip()))
+        return out
+
+    def drop(self, nnn: str) -> None:
+        """使用者選「不放這一張」：從待寫入清單拿掉（還沒寫入的才可以）。照片檔留在暫存、隨工作一起刪，編號不重用。"""
+        rows = self.manifest()
+        row = next((r for r in rows if r["nnn"] == nnn), None)
+        if row is None or row["狀態"] == "done":
+            raise PipelineError(f"第 {nnn} 張不能排除")
+        keep = [r for r in rows if r["nnn"] != nnn]
+        with open(self.p("manifest.csv"), "w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w.writeheader(); w.writerows(keep)
+        for sub, ext in (("text", ".txt"), ("fixed", ".txt")):
+            fp = self.p(sub, nnn + ext)
+            if os.path.exists(fp):
+                os.remove(fp)
+        self.drafts.pop(nnn, None); self.draft_fixed.pop(nnn, None)
 
     def draft(self, nnn: str) -> str:
         """第 2 步文字框的預設內容：讀圖草稿，沒有就用空白範本。"""
@@ -627,7 +673,23 @@ class Job:
         json.dump(entries, open(self.p("entries.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     def build(self) -> StepResult:
-        return self.must(self.run("產出公司格式", "build_company.py", "entries.json", OUTPUT, WORKBOOK), "產出失敗")
+        res = self.must(self.run("產出公司格式", "build_company.py", "entries.json", OUTPUT, WORKBOOK), "產出失敗")
+        self.strings_only()
+        return res
+
+    def strings_only(self) -> int:
+        """產出檔裡不得有公式：照片或使用者的字以「=」開頭時會被寫成公式（2026-11-23 稽核），這裡一律改回文字，字本身不動。
+        公司範本沒有公式（有的話這一步會把它變成文字，交檔檢查與測試會看得到）。回傳改了幾格。"""
+        wb = load_workbook(self.p(OUTPUT))
+        n = 0
+        for ws in wb:
+            for row in ws.iter_rows():
+                for c in row:
+                    if c.data_type == "f":
+                        c.data_type = "s"; n += 1
+        if n:
+            wb.save(self.p(OUTPUT))
+        return n
 
     def preflight_deliver(self) -> StepResult:
         return self.must(self.run("交檔檢查", "preflight.py", "deliver", OUTPUT, "entries.json"), "交檔檢查有 FAIL，不得交檔")

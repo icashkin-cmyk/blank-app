@@ -103,6 +103,15 @@ def _right_of(b: Box, pool: list[Box]) -> Box | None:
     return min(cand, key=lambda o: (max(0.0, o.x0 - b.x1), abs(o.cy - b.cy))) if cand else None
 
 
+def _labels(text: str) -> list[re.Match]:
+    """這一格裡的標籤；「人員」「日期」這類短標籤只在開頭才算（避免把內文的字當標籤）。"""
+    return [m for m in LABEL_RE.finditer(text) if not (SHORT.match(m.group(0)) and m.start() > 1)]
+
+
+def _has_label(b: Box) -> bool:
+    return bool(_labels(b.text))
+
+
 def compose(boxes: list[Box], width: int, height: int) -> rd.PhotoRead:
     """Box 清單 → PhotoRead。只用這張照片的 Box；找不到的欄位留空，不補。"""
     photo_date, rest = "", []
@@ -117,11 +126,7 @@ def compose(boxes: list[Box], width: int, height: int) -> rd.PhotoRead:
     label_boxes: list[Box] = []
     used: set[int] = set()
     for b in rest:
-        ms = list(LABEL_RE.finditer(b.text))
-        if not ms:
-            continue
-        # 「人員」「日期」這類短標籤只在開頭才算（避免把內文的字當標籤）
-        ms = [m for m in ms if not (SHORT.match(m.group(0)) and m.start() > 1)]
+        ms = _labels(b.text)
         if not ms:
             continue
         label_boxes.append(b); used.add(id(b))
@@ -136,7 +141,7 @@ def compose(boxes: list[Box], width: int, height: int) -> rd.PhotoRead:
                     val, score = o.text, o.score
                     used.add(id(o))
             elif not val and i + 1 == len(ms):     # 值在右邊另一格（手寫）
-                o = _right_of(b, [x for x in rest if id(x) not in used])
+                o = _right_of(b, [x for x in rest if id(x) not in used and not _has_label(x)])   # 右邊是另一個標籤：不是這一欄的值
                 if o is not None:
                     val, score = o.text, o.score
                     used.add(id(o))

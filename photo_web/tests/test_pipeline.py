@@ -544,3 +544,69 @@ def test_prune_drops_old_days(tmp_path):
     u = pl.Usage(str(path))
     u.prune()
     assert u._load() == {f"{datetime.date.today()}|a@example.com": 2}
+
+
+# ---------- 2026-11-23 網頁 v2 獨立稽核第 1 輪 ----------
+def _produce(job):
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    job.save_entries(job.make_entries())
+    job.build()
+    return job.preflight_deliver()
+
+
+def test_text_starting_with_equals_is_not_a_formula(job):
+    """必修 1：照片或使用者的字以「=」開頭時，Excel 裡必須是文字，不得變成公式；字本身不改。"""
+    rows = _three(job)
+    body = BODY.replace("EMT管 〈規格〉｜〈數量〉", '=HYPERLINK("http://example.com","x")')
+    for i, r in enumerate(rows):
+        job.write_text(r["nnn"], body if i == 0 else BODY, {"工程名稱": "=2+3"})
+    job.addmany()
+    assert "交檔結果：全部 PASS" in _produce(job).stdout
+    wb = load_workbook(job.p(pl.OUTPUT))
+    cells = [c for ws in wb for row in ws.iter_rows() for c in row if c.value is not None]
+    assert [f"{c.parent.title}!{c.coordinate}" for c in cells if c.data_type == "f"] == []
+    vals = [c.value for c in cells if isinstance(c.value, str)]
+    assert any("=HYPERLINK(" in v for v in vals) and "=2+3" in vals      # 字照原樣留著
+    assert len(wb.active._images) == 3                                   # 處理後照片還在
+
+
+def test_user_filled_fixed_field_is_written_when_no_photo_shows_it(job):
+    """必修 3：整批照片都沒讀到的固定欄位，使用者在確認頁補填的值要寫入（不知道的可以填上）。"""
+    rows = _three(job)
+    job.draft_fixed = {r["nnn"]: {"工程名稱": "〈甲〉", "監造單位": "", "承造單位": ""} for r in rows[:2]}
+    job.draft_fixed[rows[2]["nnn"]] = {}
+    ok = {"工程名稱": "〈甲〉", "監造單位": "", "承造單位": "〈使用者補填〉"}
+    assert job.fixed_for(rows[0]["nnn"], ok) == {"工程名稱": "〈甲〉", "承造單位": "〈使用者補填〉"}
+    assert job.fixed_for(rows[2]["nnn"], ok) == {"承造單位": "〈使用者補填〉"}   # 有別張讀得到的欄位仍不帶到沒有的那張
+    for r in rows:
+        job.write_text(r["nnn"], BODY, job.fixed_for(r["nnn"], ok))
+    job.addmany(); _produce(job)
+    base = dict((r[0], r[1]) for r in job._sheet_rows("基準"))
+    assert base.get("承造單位") == "〈使用者補填〉" and base.get("工程名稱") == "〈甲〉"
+
+
+def test_other_project_photo_is_flagged(job):
+    """必修 2：某張讀到的工程資料和整批確認的值差很多（可能是別的工程）要指出是哪一張；只差一兩個字（讀錯字）不算。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    job.draft_fixed = {a: {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所"},
+                       b: {"工程名稱": "〈甲〉市文化國區二湖改造工程〔?〕", "監造單位": "〔?〕"},
+                       c: {"工程名稱": "測試市甲乙大樓新建工程", "監造單位": "〈乙〉建築師事務所"}}
+    ok = {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所", "承造單位": ""}
+    assert job.fixed_mismatch(ok) == {c: [("工程名稱", "測試市甲乙大樓新建工程")]}
+
+
+def test_drop_photo_excludes_it_from_output(job):
+    """必修 2：使用者選「不放這一張」後，其他照片照常產出，Excel 裡沒有那一張。"""
+    rows = _three(job)
+    job.auto_read(_FakeReader())
+    job.drop(rows[1]["nnn"])
+    assert [r["nnn"] for r in job.stopped()] == [rows[0]["nnn"], rows[2]["nnn"]]
+    assert rows[1]["nnn"] not in job.draft_fixed and rows[1]["nnn"] not in job.drafts
+    for r in job.stopped():
+        job.write_text(r["nnn"], BODY, {"工程名稱": "〈甲〉"})
+    job.addmany()
+    assert job.stopped() == []
+    assert "交檔結果：全部 PASS" in _produce(job).stdout
+    assert len(load_workbook(job.p(pl.OUTPUT)).active._images) == 2

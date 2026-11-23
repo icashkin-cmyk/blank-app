@@ -224,7 +224,8 @@ def page():
         how = READER.name if READER else "人工抄寫（沒有可用的自動讀字）"
         if READER and READER.name.startswith("自動讀字"):
             st.info("照片上的字已自動讀成草稿。印刷字大多讀得到，手寫字常讀錯或讀不到：請對照照片改正，"
-                    "看不清的留〔?〕（Excel 會標成待確認）。每張看過後打勾，或用「全選」。")
+                    "看不清的留〔?〕（Excel 會標成待確認）。沒標〔?〕的字也可能讀錯，請每張都對照照片。"
+                    "每張的前兩行「查驗時間：」「照片日期：」要留著。看過後逐張打勾，或用「全選」。")
         else:
             st.info("只寫照片上看得到的字；看不清寫〔?〕。前兩行必須是「查驗時間：」「照片日期：」。每張看過後打勾，或用「全選」。")
         st.caption(f"讀字方式：{how}" + (f"｜收件：{S.add_note.removeprefix('OK ')}" if S.get("add_note") else ""))
@@ -237,14 +238,33 @@ def page():
             cols = st.columns(3)
             for c, f in zip(cols, pl.FIXED_FIELDS):
                 with c:
-                    st.text_input(f, value=(opts[f][0][0] if opts[f] else ""), key=f"fx{f}")
-                    if len(opts[f]) > 1:
-                        st.caption("各張讀到的寫法不同：" + "；".join(f"「{v}」{n} 張" for v, n in opts[f]) + "。請確認上面這一個。")
+                    st.text_input(f, value=(opts[f][0][0] if opts[f] else ""), key=f"fx{f}", max_chars=200)
+                    if not opts[f]:
+                        st.caption("照片上沒讀到這一欄；知道的話可以自己填（會記在這一批），不知道就留空。")
+                    elif len(opts[f]) > 1:
+                        st.caption("各張讀到的寫法不同：" + "；".join(f"「{v}」{n} 張" for v, n in opts[f][:4])
+                                   + ("…" if len(opts[f]) > 4 else "") + "。請對照照片確認上面這一個。")
+                    else:
+                        st.caption("自動讀到的字可能有錯，請對照照片。")
+            fx = {f: S.get(f"fx{f}", "").strip() for f in pl.FIXED_FIELDS}
+            odd = job.fixed_mismatch(fx)                      # 讀到的工程資料和上面差很多的照片：可能是別的工程
+            if odd:
+                st.error("第 " + "、".join(str(int(n)) for n in sorted(odd)) + " 張讀到的工程資料和上面差很多，可能是別的工程的照片。"
+                         "請到該張照片下方選擇：不放這一張，或確認是同一個工程。沒選之前不能產出。")
             st.subheader(f"照片（{len(todo)} 張）")
 
             def _all():
                 for r in job.stopped():
                     S[f"ok{r['nnn']}"] = S.all_ok
+
+            def _one():                                       # 取消任何一張：「全選」跟著取消
+                S.all_ok = all(S.get(f"ok{r['nnn']}") for r in job.stopped())
+            def _drop(nnn):                                   # 從這一批拿掉一張；其餘已打的勾留著
+                try:
+                    job.drop(nnn)
+                except pl.PipelineError as e:
+                    S.review_err = str(e)
+                _one()
             st.checkbox("全選：下面每一張我都看過了", key="all_ok", on_change=_all)
             for r in todo:
                 nnn = r["nnn"]
@@ -252,12 +272,19 @@ def page():
                 st.caption(r["原檔名"])
                 c1, c2 = st.columns([3, 2])
                 with c1:
-                    st.image(job.p("photos", f"{nnn}_grid.jpg"), use_container_width=True)
+                    st.image(job.p("photos", f"{nnn}_grid.jpg"), width="stretch")
                 with c2:
                     for w in S.notes.get(r["原檔名"], []):
                         st.caption("⚠ " + w)
-                    st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed")
-                    st.checkbox("我看過這一張了", key=f"ok{nnn}")
+                    if nnn in odd:
+                        st.error("這一張讀到的" + "、".join(f"{f}是「{v}」" for f, v in odd[nnn])
+                                 + "，和上面確認的不一樣。產出時這一張會記成上面的工程資料。")
+                        st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}")
+                    st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
+                                 max_chars=pl.MAX_TEXT)
+                    st.checkbox("我看過這一張了", key=f"ok{nnn}", on_change=_one)
+                    if len(todo) > 1:
+                        st.button("不放這一張（從這一批拿掉）", key=f"drop{nnn}", on_click=_drop, args=(nnn,))
         else:
             st.success("這次沒有新照片要確認，可以直接產出。")
         if st.button("產出 Excel", type="primary"):
@@ -265,6 +292,10 @@ def page():
             if miss:
                 st.warning(f"還有 {len(miss)} 張沒打勾（第 {'、'.join(map(str, miss))} 張）。看過後逐張打勾，或勾「全選」。"); st.stop()
             fx = {f: S.get(f"fx{f}", "").strip() for f in pl.FIXED_FIELDS}
+            unsure = [int(n) for n in sorted(job.fixed_mismatch(fx)) if not S.get(f"same{n}")] if todo else []
+            if unsure:
+                st.warning(f"第 {'、'.join(map(str, unsure))} 張可能是別的工程的照片：請在該張下方按「不放這一張」，"
+                           "或勾「是同一個工程」。（只有一張時，別的工程請按左側「結束並刪除暫存」重新上傳。）"); st.stop()
             for r in todo:
                 nnn = r["nnn"]
                 job.write_text(nnn, S[f"t{nnn}"], job.fixed_for(nnn, fx))
@@ -274,7 +305,7 @@ def page():
                 if left:                                      # 還有寫不進去的：說明原因，留在這一頁改
                     why = [ln for ln in res.stdout.splitlines() if ln.startswith("未寫入：")]
                     S.review_err = (f"有 {len(left)} 張沒有寫入，請照說明修改後再按一次「產出 Excel」：\n\n"
-                                    + "\n".join(f"- {pl.sanitize(w, job.dir)}" for w in why))
+                                    + "\n".join(f"- {pl.sanitize(pl.nth(w), job.dir)}" for w in why))
                     st.rerun()
             if job.pending_base():
                 guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
@@ -296,6 +327,8 @@ def page():
         if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆（白板上沒有這一欄，要填請用下面的「修改欄位」）")
         if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
         if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以紅字標出）")
+        if READER and READER.name.startswith("自動讀字"):
+            todo_notes.append("內容是自動讀字的草稿加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
         n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})
         if n_long: todo_notes.append(f"內容較長：{n_long} 筆已加高列高完整顯示（沒有截行、沒有縮字），列印前請看一下版面")
         st.download_button("下載 材料自主檢查照片.xlsx", job.output_bytes(), file_name=pl.OUTPUT, type="primary",
@@ -308,12 +341,12 @@ def page():
                 c1, c2 = st.columns([2, 3])
                 with c1:
                     if e.get("photo"):
-                        st.image(job.p(e["photo"]), use_container_width=True)
+                        st.image(job.p(e["photo"]), width="stretch")
                 with c2:
                     st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec")
                     st.text_input("檢查項目", value=e["item"], key=f"e{i}item")
-                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150)
-                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100)
+                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=pl.MAX_TEXT)
+                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=pl.MAX_TEXT)
                     st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg")
             if st.button("重新產出 Excel"):
                 for i, e in enumerate(ents):
