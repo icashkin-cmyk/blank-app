@@ -206,3 +206,11 @@ def test_empty_label_does_not_take_next_label_as_value():
     bx.append(B(700, 560, 1040, 595, "查驗日期：115.11.23", 0.97))
     r = oc.compose(bx, W, H)
     assert r.inspector == "" and r.inspect_date == "115.11.23"
+
+
+def test_simplified_words_become_traditional():
+    """MIKO 2026-11-23 回報「還有簡體字」：逐字轉換會漏掉一字多義的字（制、范、里、后、云、几、余），要照詞轉。"""
+    pytest.importorskip("opencc")
+    assert oc.to_trad("规范 制造 这里 后面 云端 几个 剩余 范围 检查项目 材料进场") == "規範 製造 這裡 後面 雲端 幾個 剩餘 範圍 檢查項目 材料進場"
+    assert oc.to_trad("台南 台电 3台 面板 系统 松木 表面") == "台南 台電 3台 面板 系統 松木 表面"   # 「台」不改成「臺」；本來就對的字不動
+    assert oc.to_trad("AB-123 25W 5.5mm²〔?〕") == "AB-123 25W 5.5mm²〔?〕"

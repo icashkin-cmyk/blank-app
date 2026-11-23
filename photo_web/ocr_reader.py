@@ -15,7 +15,7 @@ import reader as rd
 
 LOW, DROP = 0.90, 0.50                 # 低於 LOW 加〔?〕；低於 DROP 整格只留〔?〕（手寫字信心 0.8 上下仍常讀錯，門檻取高）
 Q = "〔?〕"
-KEEP = "台干后里面表板系布余松斗谷制范云几卷只才"   # 繁體也在用的字：不轉換（「台南」不可變成「臺南」）
+KEEP = "台"                             # 繁體也在用、不該被改寫的字（「台南」不可變成「臺南」）
 
 LABELS = [                              # (欄位鍵, 標籤寫法)；順序＝比對優先序
     ("工程名稱", r"工.名[稱称]"),           # 中間一字放寬：印刷標籤也會被讀錯一個字（例「工解名稱」）
@@ -56,20 +56,21 @@ _cc = None
 
 
 def to_trad(s: str) -> str:
-    """簡體字形轉繁體（OCR 模型常輸出簡體）；KEEP 內的字不動。沒裝 opencc 就原樣回傳。"""
+    """簡體字形轉繁體（OCR 模型常輸出簡體）。照詞轉換（規范→規範、這里→這裡），一字多義的單字不硬猜；KEEP 內的字不動。
+    沒裝 opencc 就原樣回傳。"""
     global _cc
     if _cc is None:
         try:
             import opencc
-            _cc = opencc.OpenCC("s2t")
+            _cc = opencc.OpenCC("s2tw")
         except Exception:
             _cc = False
-    if not _cc:
+    if not _cc or not s:
         return s
-    out = []
-    for ch in s:
-        out.append(ch if ch in KEEP or ord(ch) < 0x2E80 else _cc.convert(ch))
-    return "".join(out)
+    out = _cc.convert(s)
+    if len(out) != len(s):                 # 轉換後字數不同（少見）：無法逐字對回，照轉換結果
+        return out
+    return "".join(a if a in KEEP else b for a, b in zip(s, out))
 
 
 def mark(text: str, score: float) -> str:
