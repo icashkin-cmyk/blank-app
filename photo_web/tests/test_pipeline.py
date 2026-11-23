@@ -678,3 +678,48 @@ def test_strings_only_keeps_rich_text_of_hidden_sheets(job):
     wb = load_workbook(job.p(pl.OUTPUT), rich_text=True)
     rich = [c for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, CellRichText)]
     assert rich, "原文分頁的紅字標記不見了"
+
+
+def test_misread_suffix_of_same_company_is_not_flagged(job):
+    """稽核第 3 輪必修 2：同一家公司只是後綴被讀錯（去不掉後綴）時不得誤報成別的工程。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    ok = {"工程名稱": "", "監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"}
+    job.draft_fixed = {a: {"監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"},
+                       b: {"監造單位": "甲乙丙建築師事〔?〕", "承造單位": "東南營造有限公"},
+                       c: {"監造單位": "甲乙丙建築帥事務", "承造單位": "東商營造有限公司"}}
+    assert job.fixed_mismatch(ok) == {}
+
+
+def test_same_as_form_keeps_board_measurements(job):
+    """稽核第 3 輪必修 4：勾「實測值與材料表相符」時，白板實測與量測讀數要留著（SKILL：量測讀數只進實測值、白板實測一併保留）。"""
+    rows = _three(job)
+    forms = job.forms()
+    for r in rows:
+        job.write_text(r["nnn"], BODY, {"工程名稱": "測試工程"})
+    job.addmany()
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    ents = job.make_entries()
+    ents[0]["design"], ents[0]["measured"] = ["〈規格甲〉", "〈規格乙〉"], ["〈規格甲〉", "3660mm", "管長：366 cm（捲尺讀數）"]
+    ents[1]["design"] = ents[1]["measured"] = ["〈讀錯的品名〉｜5"]
+    a, b = rows[0]["nnn"], rows[1]["nnn"]
+    ents = job.apply_forms(ents, {a: (5, True), b: (5, True)})
+    want = [forms[5][0]] + forms[5][2]
+    assert ents[0]["measured"] == want + ["3660mm", "管長：366 cm（捲尺讀數）"]
+    assert ents[1]["measured"] == want                               # 實測欄和設計欄本來相同（只有品名規格的白板）：不重複留讀字內容
+
+
+def test_control_characters_in_edited_entries(job):
+    """稽核第 3 輪建議 5：下載頁「修改欄位」貼入控制字元或 U+FFFE 不得讓產出失敗。"""
+    rows = _three(job)
+    for r in rows:
+        job.write_text(r["nnn"], BODY + "補一行\ufffe\uffff", {"工程名稱": "測試工程"})
+    job.addmany()
+    assert job.stopped() == []
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    ents = job.make_entries()
+    ents[0]["item"] = "EMT\x07導線管"; ents[0]["design"] = ["甲\x0b乙", "丙\ufffe"]
+    job.save_entries(ents); job.build()
+    assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout

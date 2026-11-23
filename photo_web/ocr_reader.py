@@ -15,7 +15,9 @@ import reader as rd
 
 LOW, DROP = 0.90, 0.50                 # 低於 LOW 加〔?〕；低於 DROP 整格只留〔?〕（手寫字信心 0.8 上下仍常讀錯，門檻取高）
 Q = "〔?〕"
-KEEP = "台"                             # 繁體也在用、不該被改寫的字（「台南」不可變成「臺南」）
+KEEP = "台污斗游表面厘"                    # 繁體也在用、轉了反而錯的字：一律不動（台南、污水、便斗、游標卡尺、水表、液面、公厘）
+PHRASES = {"制造": "製造", "制作": "製作", "制品": "製品", "后面": "後面", "以后": "以後", "之后": "之後", "然后": "然後", "最后": "最後", "前后": "前後",
+           "云端": "雲端", "剩余": "剩餘", "其余": "其餘", "干燥": "乾燥", "里面": "裡面", "涂料": "塗料", "涂布": "塗布", "复合": "複合"}   # 整個詞都是「繁體也有的字」的簡體寫法：只認這份表
 
 LABELS = [                              # (欄位鍵, 標籤寫法)；順序＝比對優先序
     ("工程名稱", r"工.名[稱称]"),           # 中間一字放寬：印刷標籤也會被讀錯一個字（例「工解名稱」）
@@ -55,9 +57,26 @@ class Box:
 _cc = None
 
 
+FORCE = "万与丰价优体厂坏惊愿扰挂据机杰极构柜气洁确离种筑网胜虫触赶适听吨怀宁异"   # Big5 有收、但工地文字裡幾乎只會是簡體寫法的字：照簡體字處理
+
+
+def _trad_ok(ch: str) -> bool:
+    """這個字本身是不是正常的繁體字（Big5 收錄，且不在 FORCE）。簡體專用字（这、规、进、个、灯）不在 Big5。"""
+    if ch in FORCE:
+        return False
+    try:
+        ch.encode("big5")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def to_trad(s: str) -> str:
-    """簡體字形轉繁體（OCR 模型常輸出簡體）。照詞轉換（規范→規範、這里→這裡），一字多義的單字不硬猜；KEEP 內的字不動。
-    沒裝 opencc 就原樣回傳。"""
+    """簡體字形轉繁體（OCR 模型常輸出簡體），原則是「本來就正確的繁體字不動」（2026-11-23 稽核：便斗、游標卡尺、污水被改壞）：
+    1. 簡體專用字（不在 Big5 的字）照 OpenCC 的詞轉換結果改；
+    2. 繁體也有的字（范、里、后、几…）只有緊鄰簡體專用字時才跟著改（规范→規範、这里→這裡、几个→幾個）；
+    3. 整個詞都是繁體也有的字（制造、后面、云端、剩余）只認 PHRASES 這份表；
+    4. KEEP 內的字一律不動。沒有任何簡體專用字、也沒有 PHRASES 的詞時原樣回傳。沒裝 opencc 也原樣回傳。"""
     global _cc
     if _cc is None:
         try:
@@ -67,10 +86,21 @@ def to_trad(s: str) -> str:
             _cc = False
     if not _cc or not s:
         return s
+    for k, v in PHRASES.items():
+        s = s.replace(k, v)
     out = _cc.convert(s)
-    if len(out) != len(s):                 # 轉換後字數不同（少見）：無法逐字對回，照轉換結果
-        return out
-    return "".join(a if a in KEEP else b for a, b in zip(s, out))
+    if len(out) != len(s):                 # 轉換後字數不同（少見）：無法逐字對回，原樣回傳，不冒險
+        return s
+    simp = [a != b and not _trad_ok(a) for a, b in zip(s, out)]      # 這個位置是簡體專用字
+    res = []
+    for i, (a, b) in enumerate(zip(s, out)):
+        if a == b or a in KEEP:
+            res.append(a)
+        elif simp[i] or (i > 0 and simp[i - 1]) or (i + 1 < len(s) and simp[i + 1]):
+            res.append(b)
+        else:
+            res.append(a)
+    return "".join(res)
 
 
 def mark(text: str, score: float) -> str:

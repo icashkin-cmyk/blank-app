@@ -44,7 +44,7 @@ FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
 Q_MARK = "〔?〕"
 MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
 SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
-CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")   # 貼上的文字可能帶控制字元，Excel 不收
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
 
 
@@ -548,22 +548,27 @@ class Job:
         只差幾個字（讀錯字）不算；沒讀清楚（〔?〕）的寫法去掉標記後字數太少也不比。"""
         import difflib
 
-        def core(x: str) -> str:                           # 去掉〔?〕與常見後綴（「○○建築師事務所」之間後綴相同，會把不同公司算成相似）
+        def split(x: str) -> tuple[str, str, bool]:        # (去掉〔?〕的全名, 去掉常見後綴的核心, 後綴有沒有讀完整)
             x = (x or "").replace(Q_MARK, "").strip()
             for suf in SUFFIXES:
                 if x.endswith(suf) and len(x) - len(suf) >= 2:
-                    return x[:-len(suf)]
-            return x
+                    return x, x[:-len(suf)], True
+            return x, x, False
+        ratio = lambda p, q: difflib.SequenceMatcher(None, p, q).ratio()
         out: dict[str, list[tuple[str, str]]] = {}
         todo = {r["nnn"] for r in self.stopped()}
         for nnn, v in self.draft_fixed.items():
             if nnn not in todo:
                 continue
             for f in FIXED_FIELDS:
-                want, got = core(confirmed.get(f)), core(v.get(f))
+                want, wcore, wsuf = split(confirmed.get(f))
+                got, gcore, gsuf = split(v.get(f))
                 if len(want) < 2 or len(got) < 2:
                     continue
-                if difflib.SequenceMatcher(None, want, got).ratio() < MISMATCH_RATIO:
+                # 全名差很多；或兩邊後綴都讀得完整、沒有〔?〕、而核心完全對不上（「○○建築師事務所」之間後綴相同會把不同公司算成相似）。
+                # 後綴被讀錯或有〔?〕時只比全名，避免把同一家公司誤報（2026-11-23 稽核第 3 輪）。
+                clean = wsuf and gsuf and Q_MARK not in (v.get(f) or "")
+                if ratio(want, got) < MISMATCH_RATIO or (clean and ratio(wcore, gcore) < 0.34):
                     out.setdefault(nnn, []).append((f, v[f].strip()))
         return out
 
@@ -650,7 +655,6 @@ class Job:
 
     def form_options(self, nnn: str) -> list[tuple[int, str]]:
         """這一張照片的材料表選單：(材料表序號, 顯示文字)，和這張讀到的字比較像的排前面。"""
-        import difflib
         text = re.sub(r"\s+", "", self.draft(nnn))
         toks_of = lambda x: set(re.findall(r"[A-Za-z0-9.]{2,}", x))
         cjk_of = lambda x: {x[i:i + 2] for i in range(len(x) - 1) if all("\u4e00" <= c <= "\u9fff" for c in x[i:i + 2])}
@@ -673,9 +677,11 @@ class Job:
                 continue
             sheet, name, lines = self.forms()[pick[0]]
             scene = [ln for ln in e["design"] if ln.startswith("（意象：")]
+            old_design = set(e["design"])
             e["item"], e["design"] = name, [sheet] + list(lines) + scene
-            if pick[1]:
-                e["measured"] = [sheet] + list(lines)
+            if pick[1]:                                    # 相符同寫；原本只在實測欄的內容（白板實測、量測讀數）留在後面，不覆蓋
+                form = [sheet] + list(lines)
+                e["measured"] = form + [m for m in e["measured"] if m not in old_design and m not in form]
         return entries
 
     def check_report(self) -> str:
@@ -727,6 +733,8 @@ class Job:
         return json.load(open(self.p(out), encoding="utf-8"))
 
     def save_entries(self, entries: list[dict]) -> None:
+        clean = lambda x: CTRL.sub("", x) if isinstance(x, str) else [CTRL.sub("", y) if isinstance(y, str) else y for y in x] if isinstance(x, list) else x
+        entries[:] = [{k: clean(v) for k, v in e.items()} for e in entries]     # 貼上的控制字元 Excel 不收
         json.dump(entries, open(self.p("entries.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     def build(self) -> StepResult:

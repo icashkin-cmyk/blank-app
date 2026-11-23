@@ -184,6 +184,7 @@ def test_real_photos_end_to_end(tmp_path):
     notes = j.auto_read(oc.OcrReader())
     assert len(notes) == n and not any("讀圖失敗" in " ".join(v) for v in notes.values())
     fx = {f: (o[0][0] if o else "") for f, o in j.fixed_options().items()}
+    assert j.fixed_mismatch(fx) == {}                            # 稽核第 3 輪必修 2：同一工程的照片不得被指成別的工程
     for r in j.stopped():
         t = j.draft(r["nnn"]).splitlines()
         assert t[0].startswith("查驗時間：") and t[1].startswith("照片日期：")
@@ -214,3 +215,14 @@ def test_simplified_words_become_traditional():
     assert oc.to_trad("规范 制造 这里 后面 云端 几个 剩余 范围 检查项目 材料进场") == "規範 製造 這裡 後面 雲端 幾個 剩餘 範圍 檢查項目 材料進場"
     assert oc.to_trad("台南 台电 3台 面板 系统 松木 表面") == "台南 台電 3台 面板 系統 松木 表面"   # 「台」不改成「臺」；本來就對的字不動
     assert oc.to_trad("AB-123 25W 5.5mm²〔?〕") == "AB-123 25W 5.5mm²〔?〕"
+
+
+def test_traditional_words_are_never_rewritten():
+    """稽核第 3 輪必修 1：本來就正確的繁體字（含材料表用字）不得被改寫；有簡體字的詞才轉。"""
+    pytest.importorskip("opencc")
+    keep = ["掛式便斗U4360F", "游標卡尺", "液面控制器", "干擾", "里長", "范先生", "余先生", "于先生", "污排水管材料進場", "沉水式污水泵",
+            "水表", "公厘", "面板", "系統", "松木", "表面", "乾燥", "公里", "制水閥", "範圍", "斗", "后", "里", "干", "余", "范", "云", "几",
+            "茶几", "控制箱", "台電", "PVC管 4\"(100mm)", "E19 符合CNS2606"]
+    assert [w for w in keep if oc.to_trad(w) != w] == []
+    assert oc.to_trad("规范 制造 这里 后面 云端 几个 剩余 范围 检查项目 材料进场") == "規範 製造 這裡 後面 雲端 幾個 剩餘 範圍 檢查項目 材料進場"
+    assert oc.to_trad("掛式便斗 规格") == "掛式便斗 規格" and oc.to_trad("污排水管材料进场") == "污排水管材料進場"   # 同一格裡混著簡體字也不改壞
