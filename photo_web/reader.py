@@ -165,6 +165,7 @@ class FixtureReader:
     """驗收用：依照片 SHA-256 讀預先抄好的答案（JSON：{sha256: PhotoRead 欄位}）。找不到就回 None（該張不寫，留給人工）。"""
 
     name = "固定答案"
+    paid = False
 
     def __init__(self, path: str):
         self.data = json.load(open(path, encoding="utf-8"))
@@ -178,10 +179,11 @@ class ClaudeReader:
     """Claude API 視覺讀圖。金鑰只從環境變數或平台密鑰讀（ANTHROPIC_API_KEY），不寫進任何檔案。【NOT_RUN：費用待 MIKO 最後決定】"""
 
     name = "Claude API"
+    paid = True                                           # 每張都會產生費用：中斷時已送出的張數照算每日用量
 
     def __init__(self, model: str | None = None):
         import anthropic  # 延後載入：沒裝 SDK 也能跑其他部分
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(timeout=120.0, max_retries=1)   # 一張卡住最久約 4 分鐘就改人工，不長時間占住處理鎖
         self.model = model or os.environ.get("PHOTO_READER_MODEL", "claude-opus-5-5")
 
     def read(self, image_path: str, sha256: str, original_name: str) -> PhotoRead | None:
@@ -202,10 +204,23 @@ class ClaudeReader:
 
 
 def make_reader():
-    """有 PHOTO_FIXTURE 就用固定答案；有 ANTHROPIC_API_KEY 才用 Claude API；都沒有回 None（網頁改人工抄寫）。"""
+    """有 PHOTO_FIXTURE 就用固定答案；有 ANTHROPIC_API_KEY 用 Claude API；否則用本機 OCR（不用金鑰）；
+    OCR 也不能用（沒裝、模型下載失敗、PHOTO_OCR=0）回 None，網頁改人工抄寫。"""
     fx = os.environ.get("PHOTO_FIXTURE")
     if fx and os.path.exists(fx):
         return FixtureReader(fx)
     if os.environ.get("ANTHROPIC_API_KEY"):
         return ClaudeReader()
-    return None
+    return make_ocr_reader()
+
+
+def make_ocr_reader():
+    if os.environ.get("PHOTO_OCR", "1").strip() == "0":
+        return None
+    try:
+        import ocr_reader
+        return ocr_reader.OcrReader()
+    except Exception:
+        import logging
+        logging.exception("自動讀字（OCR）無法啟用，改人工抄寫")
+        return None

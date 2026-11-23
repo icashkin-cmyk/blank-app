@@ -1,7 +1,9 @@
 """S1 端到端測試：合成照片（不含任何真實工地資料）→ 既有腳本 → 材料自主檢查照片.xlsx。
 執行：PHOTO_SKILL_DIR=<miko>/skills/photo-inspection-log/scripts python3 -m pytest -q photo_web/tests
 沒設 PHOTO_SKILL_DIR 時從 GitHub 固定 commit 下載腳本（需要網路）。"""
+import datetime
 import io
+import json
 import os
 import sys
 
@@ -161,6 +163,8 @@ def test_fixture13_end_to_end(job):
     notes = job.auto_read(rdr)
     assert len(notes) == 11
     assert all(not any("與白板相同" in w for w in ws) for ws in notes.values())  # 沒有拿白板值充當讀數
+    for r in job.manifest():                                           # 模擬使用者逐張勾選「我已看過」
+        job.write_text(r["nnn"], job.draft(r["nnn"]), job.draft_fixed.get(r["nnn"]))
     res = job.addmany()
     assert "寫入 11 張" in res.stdout, res.stdout
     assert job.stopped() == []
@@ -213,3 +217,396 @@ def test_warning_when_reading_copies_whiteboard():
     import reader as rd
     r = rd.PhotoRead.from_dict({"kind": "量測", "fixed": {}, "lines": ["〈品名〉｜3.67m"], "readings": ["捲尺讀數：3.67m"]})
     assert any("與白板相同" in w for w in rd.warnings(r))
+
+
+# ---------- 2026-11-23 網頁獨立稽核（W2、W4）必修項目的重現測試 ----------
+class _FakeReader:
+    name = "假讀圖"
+
+    def __init__(self, fail_on=()):
+        self.fail_on = set(fail_on)
+
+    def read(self, image_path, sha256, original_name):
+        import reader as rd
+        if original_name in self.fail_on:
+            raise RuntimeError("API 壞了 /secret/path")
+        return rd.PhotoRead.from_dict({"kind": "白板", "fixed": {}, "inspect_date": "115.10.27", "photo_date": "2026-10-27",
+                                       "item": "〈項目〉", "lines": ["〈字〉"]})
+
+
+def _three(job):
+    job.preflight_start()
+    job.add_photos([(f"IMG_{i:04d}.JPG", photo(i, f"2026:10:27 09:{i:02d}:00")) for i in range(1, 4)])
+    return job.manifest()
+
+
+def test_unchecked_photos_are_not_written(job):
+    """稽核 W2：讀圖草稿在使用者勾選前不得落在 text/NNN.txt；只勾 1 張就只寫入 1 張。"""
+    rows = _three(job)
+    job.auto_read(_FakeReader())
+    assert not any(os.path.exists(job.p("text", f"{r['nnn']}.txt")) for r in rows)
+    assert all("〈字〉" in job.draft(r["nnn"]) for r in rows)
+    job.write_text(rows[0]["nnn"], job.draft(rows[0]["nnn"]), None)
+    job.addmany()
+    assert len(job.stopped()) == 2
+
+
+def test_auto_read_survives_one_failure(job):
+    """稽核 W3：一張讀圖失敗不得整批失敗；該張留給人工，訊息不帶內部細節。"""
+    rows = _three(job)
+    notes = job.auto_read(_FakeReader(fail_on={"IMG_0002.JPG"}))
+    assert notes["IMG_0002.JPG"] == ["讀圖失敗，請人工抄寫"]
+    assert "〈字〉" in job.draft(rows[0]["nnn"]) and "〈字〉" in job.draft(rows[2]["nnn"])
+    assert "〈字〉" not in job.draft(rows[1]["nnn"])
+
+
+def test_photo_count_includes_zip_and_limit(job):
+    """稽核 W4：張數上限要算 zip 裡的照片；超過上限在解壓前就擋下。"""
+    import zipfile
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for i in range(1, 6):
+            z.writestr(f"p{i}.jpg", photo(i, f"2026:10:27 09:{i:02d}:00"))
+    files = [("a.zip", b.getvalue()), ("x.jpg", photo(9, "2026:10:27 10:00:00"))]
+    assert pl.count_photos(files) == 6
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="超過"):
+        job.add_photos(files, max_photos=5)
+    assert job.manifest() == []
+
+
+def test_non_image_rejected_with_clear_message(job):
+    """稽核 W5(b)：副檔名是 jpg 但內容不是圖片，要在收件時擋下並說是哪個檔，不得進到後面才丟 Traceback。"""
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="fake.jpg"):
+        job.add_photos([("fake.jpg", b"this is not an image")])
+    assert job.manifest() == []
+
+
+def test_report_and_messages_hide_server_paths(job, monkeypatch):
+    """稽核 W4：交檔檢查紀錄與顯示給使用者的輸出不得出現伺服器路徑。"""
+    monkeypatch.setenv("PHOTO_SKILL_DIR", os.environ.get("PHOTO_SKILL_DIR", "/srv/secret/scripts"))
+    job.preflight_start()
+    rep = job.check_report()
+    assert job.dir not in rep and os.environ["PHOTO_SKILL_DIR"] not in rep
+    msg = pl.sanitize(f'Traceback\n  File "{job.dir}/scripts/x.py", line 3\n  File "/usr/lib/python3/site-packages/PIL/Image.py"\nValueError: 壞了', job.dir)
+    assert job.dir not in msg and "site-packages" not in msg and "ValueError: 壞了" in msg
+
+
+def test_sweep_removes_old_jobs(tmp_path):
+    """稽核 W4：沒按「結束並刪除暫存」的工作資料夾，逾時要自動清掉；還在用的不動。"""
+    old, new = pl.Job(root=str(tmp_path)), pl.Job(root=str(tmp_path))
+    t = __import__("time").time() - 7200
+    os.utime(old.dir, (t, t))
+    assert pl.sweep(str(tmp_path), max_age_s=3600) == 1
+    assert not os.path.exists(old.dir) and os.path.exists(new.dir)
+    new.cleanup()
+
+
+def test_usage_counts_per_user_and_blocks_anonymous_sharing(tmp_path):
+    """稽核 W4：每日用量按使用者分開；沒登入的人不共用同一個額度鍵（改用工作階段代號）。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    u.add("a@example.com", 3); u.add("b@example.com", 1); u.add("a@example.com", 2)
+    assert (u.used("a@example.com"), u.used("b@example.com"), u.used("anon:s1")) == (5, 1, 0)
+
+
+# ---------- 2026-11-23 網頁第二輪獨立稽核的重現測試 ----------
+def test_zip_dot_prefixed_images_are_counted(job):
+    """稽核 F4：zip 裡檔名以「.」開頭的圖片，既有腳本 prep 會收（只排除「._」），計數與檢查必須用同一個條件。"""
+    import zipfile
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("n.jpg", photo(1, "2026:10:27 09:01:00"))
+        for i in range(2, 8):
+            z.writestr(f"sub/.h{i}.jpg", photo(i, f"2026:10:27 09:{i:02d}:00"))
+        z.writestr("__MACOSX/._n.jpg", b"resource fork")          # 這種 prep 不收，也不算
+    files = [("dot.zip", b.getvalue())]
+    assert pl.count_photos(files) == 7
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="超過"):
+        job.add_photos(files, max_photos=5)
+    job.add_photos(files, max_photos=7)
+    assert len(job.manifest()) == 7                                # 計數與實際收到的張數一致
+
+
+def test_huge_pixel_image_rejected(job):
+    """稽核建議：像素極大但檔案很小的圖（解壓炸彈）在收件時擋下。"""
+    b = io.BytesIO()
+    Image.new("L", (12000, 12000), 255).save(b, "PNG")
+    job.preflight_start()
+    with pytest.raises(pl.PipelineError, match="big.png"):
+        job.add_photos([("big.png", b.getvalue())])
+
+
+def test_sanitize_hides_other_absolute_paths():
+    """稽核建議：錯誤最後一行帶其他絕對路徑時也要遮掉。"""
+    msg = pl.sanitize("Traceback (most recent call last):\n  File \"/x/y.py\", line 1\nValueError: bad /home/appuser/app/photo_web/pipeline.py")
+    assert "/home/appuser" not in msg and "ValueError: bad" in msg
+
+
+def test_usage_try_add_is_atomic_check(tmp_path):
+    """稽核建議：每日上限的檢查與累加要在同一個鎖裡；超過就不加。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    assert u.try_add("a@example.com", 4, limit=5) is True
+    assert u.try_add("a@example.com", 2, limit=5) is False
+    assert u.used("a@example.com") == 4
+    assert u.try_add("a@example.com", 99, limit=0) is True         # 0＝不限
+
+
+def test_job_touch_keeps_active_job_from_sweep(tmp_path):
+    """稽核建議：使用者停在填欄位很久，只要頁面還在重跑（touch）就不被 sweep 清掉。"""
+    j = pl.Job(root=str(tmp_path))
+    t = __import__("time").time() - 7200
+    os.utime(j.dir, (t, t))
+    j.touch()
+    assert pl.sweep(str(tmp_path), max_age_s=3600) == 0 and os.path.exists(j.dir)
+    j.cleanup()
+
+
+def test_access_policy():
+    """稽核 F3／建議：名單變數有設但解析後是空的要擋下；未驗證的 email 不算；有金鑰時要同時有名單與每日上限才啟用付費讀圖。"""
+    assert pl.parse_allowed(None) == (False, set())
+    assert pl.parse_allowed(" , ") == (True, set())
+    assert pl.parse_allowed("A@Example.com, b@example.com") == (True, {"a@example.com", "b@example.com"})
+    assert pl.paid_reading_allowed(allowed={"a@example.com"}, daily=20) is True
+    assert pl.paid_reading_allowed(allowed={"a@example.com"}, daily=0) is False
+    assert pl.paid_reading_allowed(allowed=set(), daily=20) is False
+
+
+# ---------- 2026-11-23 網頁第三輪獨立稽核的重現測試 ----------
+def test_usage_refund(tmp_path):
+    """稽核：收件失敗或照片重複時要把預扣的用量退回，不得白扣。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    assert u.try_add("a@example.com", 4, limit=5)
+    u.refund("a@example.com", 3)
+    assert u.used("a@example.com") == 1
+    u.refund("a@example.com", 99)
+    assert u.used("a@example.com") == 0                            # 不會退成負數
+
+
+def test_parse_daily_limit():
+    """稽核建議：每日上限設成非數字或負數時，回報設定錯誤而不是整頁壞掉或擋住所有人。"""
+    assert pl.parse_daily(None) == (0, "") and pl.parse_daily("20") == (20, "")
+    assert pl.parse_daily("abc")[1] and pl.parse_daily("-1")[1]
+
+
+def test_heic_accepted(job):
+    """稽核：裝了 pillow-heif 的正式環境，HEIC 不得在收件時被當成「不是圖片」拒收。"""
+    pillow_heif = pytest.importorskip("pillow_heif")
+    pillow_heif.register_heif_opener()
+    b = io.BytesIO()
+    Image.new("RGB", (640, 480), (200, 200, 190)).save(b, "HEIF")
+    import subprocess
+    code = ("import sys, io; sys.path.insert(0, %r); import pipeline as pl; "
+            "pl._check_image('IMG_0001.HEIC', sys.stdin.buffer.read()); print('ok')" % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    cp = subprocess.run([sys.executable, "-c", code], input=b.getvalue(), capture_output=True)   # 新行程：不受本測試註冊的影響
+    assert cp.stdout.strip() == b"ok", cp.stderr.decode()[-300:]
+
+
+# ---------- 2026-11-23 網頁第四輪獨立稽核的重現測試 ----------
+def test_failed_job_creation_leaves_no_folder(tmp_path):
+    """稽核建議：腳本來源缺檔時，建立工作失敗不得留下空殼資料夾。"""
+    root, empty = tmp_path / "jobs", tmp_path / "noscripts"
+    empty.mkdir()
+    with pytest.raises(Exception):
+        pl.Job(root=str(root), scripts_src=str(empty))
+    assert not root.exists() or os.listdir(root) == []
+
+
+# ---------- 2026-11-23 網頁第五輪獨立稽核的重現測試：預扣記在工作資料夾，中斷後能退 ----------
+def test_reservation_survives_lost_session_and_is_recovered(tmp_path):
+    """稽核：處理中重新整理（工作階段消失）時，預扣沒人退，同一人再按就被每日上限擋下。
+    預扣要記在工作資料夾；沒有結清、也沒有人在處理的工作，下一次開頁時退回並清掉。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        assert j.reserve(u, "a@example.com", 13, limit=20) is True
+        assert pl.recover(u, str(tmp_path)) == 0               # 還在處理中：不能動
+        assert u.used("a@example.com") == 13
+    # 工作階段消失：沒有結清，也沒有人持有處理鎖
+    assert pl.recover(u, str(tmp_path)) == 1
+    assert u.used("a@example.com") == 0 and not os.path.exists(j.dir)
+
+
+def test_settle_charges_actual_and_is_not_recovered(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        j.reserve(u, "a@example.com", 13, limit=20)
+        j.settle(u, 11)                                        # 13 張含 2 張重複 → 只算 11
+    assert u.used("a@example.com") == 11
+    assert pl.recover(u, str(tmp_path)) == 0 and os.path.exists(j.dir)   # 已結清的工作不退、不刪
+    j.abandon(u)                                               # 結清後按「結束並刪除暫存」：不退用量
+    assert u.used("a@example.com") == 11 and not os.path.exists(j.dir)
+
+
+def test_abandon_before_settle_refunds(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    j.reserve(u, "a@example.com", 5, limit=20)
+    j.abandon(u)
+    assert u.used("a@example.com") == 0 and not os.path.exists(j.dir)
+
+
+def test_reserve_respects_limit(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    assert j.reserve(u, "a@example.com", 21, limit=20) is False
+    assert u.used("a@example.com") == 0
+    j.abandon(u)
+
+
+# ---------- 2026-11-23 第五輪後補：中斷時付費讀圖已花的張數不退；讀圖可被中斷 ----------
+class _PaidReader(_FakeReader):
+    paid = True
+
+
+def test_interrupted_paid_reading_keeps_spent_photos_charged(job, tmp_path):
+    """處理中被中斷（重新整理、讀圖中改檔案）：已送去付費讀圖的張數照算，其餘退回；
+    否則反覆中斷就能不占額度地一直花讀圖費用。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+
+    class Stop(BaseException):
+        pass
+
+    def on_photo(i, n):
+        if i == 2:                                             # 讀完 2 張後被中斷
+            raise Stop()
+
+    with pytest.raises(Stop):
+        with job.processing():
+            job.reserve(u, "a@example.com", 3, limit=20)
+            _three(job)
+            job.auto_read(_PaidReader(), on_photo=on_photo)
+    assert pl.recover(u, os.path.dirname(job.dir)) == 1
+    assert u.used("a@example.com") == 2
+
+
+def test_interrupted_free_reading_refunds_everything(job, tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    job.reserve(u, "a@example.com", 3, limit=20)
+    _three(job)
+    seen = []
+    job.auto_read(_FakeReader(), on_photo=lambda i, n: seen.append((i, n)))
+    assert seen == [(0, 3), (1, 3), (2, 3)]                    # 每張讀之前呼叫一次（頁面用來更新進度、讓中斷生效）
+    job.abandon(u)
+    assert u.used("a@example.com") == 0
+
+
+def test_refund_happens_only_once(tmp_path):
+    """同一筆預扣只能退一次：abandon 之後 recover 不再退。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j1, j2 = pl.Job(root=str(tmp_path)), pl.Job(root=str(tmp_path))
+    j1.reserve(u, "a@example.com", 5, limit=20)
+    j2.reserve(u, "a@example.com", 4, limit=20)
+    r = j1._claim()
+    assert r and r["n"] == 5 and j1._claim() is None           # 第二次拿不到
+    assert pl.pending_reserved("a@example.com", str(tmp_path)) == 4
+    j1.cleanup(); j2.abandon(u)
+
+
+# ---------- 2026-11-23 網頁第六輪獨立稽核 ----------
+def test_interrupted_job_without_daily_limit_is_cleaned(tmp_path):
+    """稽核 M1：沒設每日上限時，處理中斷的工作資料夾（含照片）也要在下一次開頁時清掉。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        j.begin()
+        assert pl.recover(u, str(tmp_path)) == 0               # 處理中不動
+    assert pl.recover(u, str(tmp_path)) == 1 and not os.path.exists(j.dir)
+    assert u._load() == {}                                     # 沒設上限：不記任何人的用量
+
+
+def test_finished_job_without_daily_limit_is_kept(tmp_path):
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    with j.processing():
+        j.begin(); j.settle(u, 3)
+    assert pl.recover(u, str(tmp_path)) == 0 and os.path.exists(j.dir) and u._load() == {}
+    j.cleanup()
+
+
+def test_settle_never_charges_less_than_paid_reads(tmp_path):
+    """稽核 S1：結清時已付費讀過的張數不能少算。"""
+    u = pl.Usage(str(tmp_path / "usage.json"))
+    j = pl.Job(root=str(tmp_path))
+    j.reserve(u, "a@example.com", 5, limit=20)
+    j._spend(); j._spend(); j._spend()
+    j.settle(u, 1)
+    assert u.used("a@example.com") == 3
+    j.cleanup()
+
+
+def test_prune_drops_old_days(tmp_path):
+    """稽核 S3：舊日期的用量（含 email）在開頁時就清掉，不等到有人上傳。"""
+    path = tmp_path / "usage.json"
+    path.write_text(json.dumps({"2000-01-01|old@example.com": 5, f"{datetime.date.today()}|a@example.com": 2}), encoding="utf-8")
+    u = pl.Usage(str(path))
+    u.prune()
+    assert u._load() == {f"{datetime.date.today()}|a@example.com": 2}
+
+
+# ---------- 2026-11-23 網頁 v2 獨立稽核第 1 輪 ----------
+def _produce(job):
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    job.save_entries(job.make_entries())
+    job.build()
+    return job.preflight_deliver()
+
+
+def test_text_starting_with_equals_is_not_a_formula(job):
+    """必修 1：照片或使用者的字以「=」開頭時，Excel 裡必須是文字，不得變成公式；字本身不改。"""
+    rows = _three(job)
+    body = BODY.replace("EMT管 〈規格〉｜〈數量〉", '=HYPERLINK("http://example.com","x")')
+    for i, r in enumerate(rows):
+        job.write_text(r["nnn"], body if i == 0 else BODY, {"工程名稱": "=2+3"})
+    job.addmany()
+    assert "交檔結果：全部 PASS" in _produce(job).stdout
+    wb = load_workbook(job.p(pl.OUTPUT))
+    cells = [c for ws in wb for row in ws.iter_rows() for c in row if c.value is not None]
+    assert [f"{c.parent.title}!{c.coordinate}" for c in cells if c.data_type == "f"] == []
+    vals = [c.value for c in cells if isinstance(c.value, str)]
+    assert any("=HYPERLINK(" in v for v in vals) and "=2+3" in vals      # 字照原樣留著
+    assert len(wb.active._images) == 3                                   # 處理後照片還在
+
+
+def test_user_filled_fixed_field_is_written_when_no_photo_shows_it(job):
+    """必修 3：整批照片都沒讀到的固定欄位，使用者在確認頁補填的值要寫入（不知道的可以填上）。"""
+    rows = _three(job)
+    job.draft_fixed = {r["nnn"]: {"工程名稱": "〈甲〉", "監造單位": "", "承造單位": ""} for r in rows[:2]}
+    job.draft_fixed[rows[2]["nnn"]] = {}
+    ok = {"工程名稱": "〈甲〉", "監造單位": "", "承造單位": "〈使用者補填〉"}
+    assert job.fixed_for(rows[0]["nnn"], ok) == {"工程名稱": "〈甲〉", "承造單位": "〈使用者補填〉"}
+    assert job.fixed_for(rows[2]["nnn"], ok) == {"承造單位": "〈使用者補填〉"}   # 有別張讀得到的欄位仍不帶到沒有的那張
+    for r in rows:
+        job.write_text(r["nnn"], BODY, job.fixed_for(r["nnn"], ok))
+    job.addmany(); _produce(job)
+    base = dict((r[0], r[1]) for r in job._sheet_rows("基準"))
+    assert base.get("承造單位") == "〈使用者補填〉" and base.get("工程名稱") == "〈甲〉"
+
+
+def test_other_project_photo_is_flagged(job):
+    """必修 2：某張讀到的工程資料和整批確認的值差很多（可能是別的工程）要指出是哪一張；只差一兩個字（讀錯字）不算。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    job.draft_fixed = {a: {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所"},
+                       b: {"工程名稱": "〈甲〉市文化國區二湖改造工程〔?〕", "監造單位": "〔?〕"},
+                       c: {"工程名稱": "測試市甲乙大樓新建工程", "監造單位": "〈乙〉建築師事務所"}}
+    ok = {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所", "承造單位": ""}
+    assert job.fixed_mismatch(ok) == {c: [("工程名稱", "測試市甲乙大樓新建工程")]}
+
+
+def test_drop_photo_excludes_it_from_output(job):
+    """必修 2：使用者選「不放這一張」後，其他照片照常產出，Excel 裡沒有那一張。"""
+    rows = _three(job)
+    job.auto_read(_FakeReader())
+    job.drop(rows[1]["nnn"])
+    assert [r["nnn"] for r in job.stopped()] == [rows[0]["nnn"], rows[2]["nnn"]]
+    assert rows[1]["nnn"] not in job.draft_fixed and rows[1]["nnn"] not in job.drafts
+    for r in job.stopped():
+        job.write_text(r["nnn"], BODY, {"工程名稱": "〈甲〉"})
+    job.addmany()
+    assert job.stopped() == []
+    assert "交檔結果：全部 PASS" in _produce(job).stdout
+    assert len(load_workbook(job.p(pl.OUTPUT)).active._images) == 2

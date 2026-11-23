@@ -4,18 +4,81 @@
 網頁只負責收件、呼叫、確認、交件；排版與名詞只由 Skill 的既有腳本與範本決定，腳本在執行時從
 icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 repo 複製一份。
 
-## 流程（對應 SKILL.md「二、流程」）
-1. 上傳照片（20 張以內或 zip；可附上次的 xlsx 接續）→ `preflight start`、`restore`、`prep`（SHA-256 去重）
-2. 讀圖：任何照片先抓照片上的字；沒有字或字不足時寫「（意象：…）」描述。原字與描述分開標示。
-   使用者逐張核對後勾選寫入（`addmany`，來源行由程式依 manifest 產生）
-3. 確認新基準（工程名稱、監造、承造第一次出現時）與分項工程名稱（`base`、`sub`）
-4. 填欄位：`make_entries` 後，照片沒有查驗項目欄時用照片上的品名當建議；量測讀數搬到實測值
-5. `build_company` → `preflight deliver`（印 FAIL 也回 0 的既有缺陷由本模組攔下）→ 下載
+## 流程（三步；對應 SKILL.md「二、流程」）
+1. 上傳照片（20 張以內或 zip；可附上次的 xlsx 接續）→ `preflight start`、`restore`、`prep`（SHA-256 去重）→ 自動讀字成草稿。
+2. 確認內容（一頁）：
+   - 工程資料（工程名稱、監造單位、承造單位）整批確認一次：預設取各張讀到的多數寫法，沒讀清楚（含〔?〕）的寫法不當預設；
+     各張寫法不同時列出來讓使用者確認上面那一個。確認值只寫進「這張照片上讀得到該欄」的照片；人工抄寫時每張都用。
+     （Skill 的規則是固定欄位與基準不同就不寫並問使用者；網頁把「問」集中成這一次確認，按「產出 Excel」即視為確認並寫入基準。）
+     整批沒有任何一張讀到的欄位，使用者自己補填的值每張都寫入（不知道就留空）。
+   - 可能是別的工程的照片：某張讀到的工程資料和確認值相似度低於 0.5（`pipeline.MISMATCH_RATIO`；只差幾個字的讀錯字不算）時，
+     頁面用紅字指出是第幾張，使用者要逐張選「不放這一張」或勾「是同一個工程（只是讀錯字）」；沒選不能產出，「全選」不會代選。
+   - 每張照片都有「不放這一張」（只剩一張時沒有；要整批重來請按「結束並刪除暫存」）。
+   - 每張照片一個文字框（工作檔格式）與「我看過這一張了」；可用「全選」。有任何一張沒打勾就不產出。
+   - 按「產出 Excel」：`addmany` → `base --all` → `make_entries` → `build_company` → 公式改回文字 → `preflight deliver`
+     （照片或使用者的字以「=」開頭時，`build_company.py` 會寫成 Excel 公式；網頁在產出後把所有公式格改回文字、字不動。公司範本的產出檔本來沒有公式。）
+   - 每張文字框上限 4000 字（`pipeline.MAX_TEXT`）。
+     （印 FAIL 也回 0 的既有缺陷由本模組攔下）。有照片寫不進去時說明原因、留在這一頁。
+3. 下載：Excel；要改分項工程名稱、檢查項目、設計/標準值、實測值、棟別時，用「修改欄位後重新產出」（選用）。
 
-## 讀圖方式（`reader.make_reader()`）
+## 讀字方式（`reader.make_reader()`，依序）
 - `PHOTO_FIXTURE=<answers.json>`：固定答案（驗收用，依照片 SHA-256 對應）
-- `ANTHROPIC_API_KEY`（平台密鑰設定，不寫進檔案）：Claude API 視覺讀圖。**尚未實跑，費用待決定**
-- 都沒有：人工抄寫
+- `ANTHROPIC_API_KEY`（平台密鑰設定，不寫進檔案）：Claude API 視覺讀圖。**尚未實跑（NOT_RUN），費用待決定**。
+  只有同時設了 `PHOTO_ALLOWED_EMAILS` 與 `PHOTO_DAILY_LIMIT` 才會啟用；沒同時設時改用下面的自動讀字。一張讀圖失敗只影響那一張，改人工抄寫。
+- 預設：本機 OCR 自動讀字（`ocr_reader.py`，RapidOCR 的 PP-OCRv6 small 模型），不用金鑰、照片不送到外部服務。
+  模型在第一次使用時由 RapidOCR 從它的模型站下載並快取。
+- OCR 不能用（沒裝、模型下載失敗、`PHOTO_OCR=0`）：人工抄寫。
+
+### 自動讀字的做法與限制
+- 找印刷標籤（工程名稱、監造單位、承攬廠商、查驗項目、檢查人員、查驗日期、廠牌）取值；白板斜拍時先扶正再分列；最右邊的數字當數量欄。
+- 信心低於 0.90 的格子後面加〔?〕；低於 0.50 的只留〔?〕、不留猜的字。簡體字形轉繁體（「台」等繁體也在用的字不轉）。
+- 白板以外的字（紙箱印刷等）收成一行「（旁註：白板以外的字：…）」；不是白板的照片只照抄看得到的字，不套欄位。
+- 查驗日期讀出來不像日期、或和照片日期浮水印不同時只標〔?〕，不改寫。
+- OCR 不會描述照片內容（意象）、不會讀量具刻度、不會推定檢查項目：這些欄位留空，由使用者補。
+- 實測（2026-11-23，9 張手寫白板，以人工判讀為準）：詞命中 44/97（45%），每張約 1 秒；印刷標籤大多正確，手寫字常讀錯，
+  且有信心高但讀錯的字（例：把數量讀成別的數字）。所以草稿一定要人看過；直接全選時，〔?〕會留在 Excel（紅字待確認），
+  沒被標記的錯字不會被發現。
+
+讀字結果只是草稿，放在記憶體；使用者在第 2 步打勾後才寫入。
+
+## 環境變數
+| 名稱 | 用途 | 預設 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Claude API 讀圖的金鑰，只填在平台密鑰設定 | 無（用本機 OCR 自動讀字） |
+| `PHOTO_OCR` | 設成 `0` 關掉本機 OCR（改人工抄寫） | `1` |
+| `PHOTO_READER_MODEL` | 讀圖模型 | `claude-opus-5-5` |
+| `PHOTO_ALLOWED_EMAILS` | 可使用的 email，逗號分隔；設了就要先登入。有設但內容是空的＝沒有人可用 | 無（不限、不需登入） |
+| `PHOTO_DAILY_LIMIT` | 每人每日張數上限（zip 裡的也算） | 0（不限） |
+| `PHOTO_SKILL_DIR` | 改用本機的 Skill 腳本資料夾（開發用） | 無（從 GitHub 固定 commit 下載） |
+| `PHOTO_FIXTURE` | 固定讀圖答案（驗收用） | 無 |
+
+## 限制
+- 一次 20 張以內（`pipeline.MAX_PHOTOS`，zip 裡的也算，篩選條件與 Skill 的 `prep` 相同）、解開後總大小 300MB 以內、單張 8000 萬像素以內；巢狀 zip 不處理；副檔名是圖片但內容打不開的檔會在收件時擋下。
+- 同名檔案會互相覆蓋，上傳前請確認檔名不同。
+- 接續上次的 xlsx 時，照片與原文會帶回來；用「修改欄位後重新產出」改過的欄位（含讀圖建議的檢查項目）不會帶回，要再改一次。
+- 每日上限：收件失敗或重複的照片不算；`PHOTO_DAILY_LIMIT` 不是數字或是負數時頁面會顯示設定錯誤。未預期的錯誤細節只寫在伺服器紀錄。
+- PDF 預覽需要環境裝有 LibreOffice；雲端沒有新細明體、標楷體時，PDF 的欄寬與字型和電腦版 Excel 不同，只供抽看。
+- 每日用量先預扣、收件與讀圖完成後結清：預扣記在工作資料夾（`reserve.json`），處理中被中斷（重新整理、斷線、讀圖中更換檔案）時，沒用到的張數在下一次開啟頁面時退回；已送去付費讀圖（Claude API）的張數照算、不退，避免反覆中斷不占額度地花讀圖費用。結清後按「結束並刪除暫存」不退。
+- 每日用量記在暫存資料夾，容器重啟會歸零；沒登入的人以工作階段計，重新整理或換瀏覽器就重算，所以只設每日上限、不設使用者名單時，上限擋不住人；要控管費用請設使用者名單。舊日期的用量（含 email）在隔天起有人開啟網頁時清除；工作資料夾裡的預扣紀錄也含 email，隨資料夾清除。
+- 沒設每日上限時也會留一筆不含使用者的「處理中」紀錄，處理中斷的工作資料夾（含照片）在下一次有人開啟網頁時清掉。
+- Claude API 讀圖每張逾時 120 秒、重試 1 次，仍失敗就改人工抄寫。
+- 已知限制：第 2 步照片還在載入時版面會位移，請等照片顯示完再勾選；自動讀字要另外占約 300MB 記憶體【推論，未量測】；沒有全站的工作數與磁碟總量上限（部署時請調低 `server.maxUploadSize`）。
+- 工作資料夾在 `<暫存>/photo_web_jobs/`：按「結束並刪除暫存」立即刪除；沒按時，閒置超過 2 小時後，在下一次有人開啟頁面時清除（沒有人開頁面就不會清；頁面開著並持續操作的工作不會被清）。
+
+## 部署（Streamlit Community Cloud，尚未實際部署）
+1. 在 share.streamlit.io 新增 App：repo `icashkin-cmyk/blank-app`、主檔 `photo_web/app.py`、相依檔 `photo_web/requirements.txt`。
+2. 需要 PDF 預覽時，在 repo 根目錄加 `packages.txt`（內容 `libreoffice`）。
+3. 在 App 的 Secrets 填環境變數（上表）。要限制使用者時再加 Streamlit 的登入設定：
+   ```
+   [auth]
+   redirect_uri = "https://<你的 App 網址>/oauth2callback"
+   cookie_secret = "<自己產生的隨機字串>"
+   client_id = "<OIDC client id>"
+   client_secret = "<OIDC client secret>"
+   server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+   ```
+   金鑰與上列密鑰只填在平台的 Secrets，不寫進 repo。
+4. 關掉工具列與錯誤細節：Streamlit Community Cloud 沒有設定畫面，要在 repo 根目錄加 `.streamlit/config.toml`，內容是 `[client]` 區段的 `toolbarMode = "viewer"` 與 `showErrorDetails = "none"`（`false` 仍會顯示堆疊）。這個檔會同時影響同一個 repo 的其他 Streamlit 頁面，所以本 repo 目前沒有加，由部署的人決定。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
 
 ## 執行與測試
 ```
@@ -23,4 +86,7 @@ pip install -r photo_web/requirements.txt
 streamlit run photo_web/app.py
 PHOTO_SKILL_DIR=<miko>/skills/photo-inspection-log/scripts python3 -m pytest -q photo_web/tests
 ```
-13 張驗收照片含工地與個人資訊，只放私有專案檔（`PHOTO_FIXTURE_DIR`），不進本公開 repo。
+- `pipeline.SKILL_COMMIT` 固定在 photo-inspection-log v0.23 的稽核版 commit（miko PR #66 的分支上，尚未合併進 main）。合併後請改成 main 上的合併 commit；PR 若關閉且分支刪除，這個 commit 之後可能下載不到。
+- 不設 `PHOTO_SKILL_DIR` 時測試全部通過（需要對外連線的與需要驗收照片的測試，條件不足時略過）。
+- `tests/test_ocr_reader.py` 用假的 OCR 格子測規則與反向情況，不需要模型；設 `PHOTO_OCR_DIR=<照片資料夾>` 時另外實際跑模型走完整流程。
+- 13 張驗收照片含工地與個人資訊，只放私有專案檔（`PHOTO_FIXTURE_DIR`），不進本公開 repo。
