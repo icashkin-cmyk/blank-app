@@ -282,6 +282,13 @@ def page():
                         st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
                                  max_chars=pl.MAX_TEXT)
+                    if job.forms():                           # 材料表品項：用選的，不靠讀字
+                        fo = dict(job.form_options(nnn))
+                        st.selectbox("材料表品項（選用）", [-1] + list(fo), key=f"form{nnn}",
+                                     format_func=lambda i, fo=fo: "不指定（照上面的字）" if i < 0 else fo[i],
+                                     help="選了以後，檢查項目與設計/標準值照公司材料表帶入，不用打字；比較像的排在前面。")
+                        if S.get(f"form{nnn}", -1) >= 0:
+                            st.checkbox("實測值與材料表相符（實測值也照材料表寫）", key=f"fsame{nnn}")
                     st.checkbox("我看過這一張了", key=f"ok{nnn}", on_change=_one)
                     if len(todo) > 1:
                         st.button("不放這一張（從這一批拿掉）", key=f"drop{nnn}", on_click=_drop, args=(nnn,))
@@ -309,7 +316,8 @@ def page():
                     st.rerun()
             if job.pending_base():
                 guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
-            S.entries = job.apply_suggestions(guard(job.make_entries))
+            chosen = {r["nnn"]: (S[f"form{r['nnn']}"], bool(S.get(f"fsame{r['nnn']}"))) for r in todo if S.get(f"form{r['nnn']}", -1) >= 0}
+            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries)), chosen)
             job.save_entries(S.entries)
             guard(job.build)
             guard(job.preflight_deliver)

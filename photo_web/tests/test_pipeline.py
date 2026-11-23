@@ -610,3 +610,27 @@ def test_drop_photo_excludes_it_from_output(job):
     assert job.stopped() == []
     assert "交檔結果：全部 PASS" in _produce(job).stdout
     assert len(load_workbook(job.p(pl.OUTPUT)).active._images) == 2
+
+
+def test_chosen_material_form_fills_item_and_design(job):
+    """MIKO 2026-11-23「用水電材料加強」：使用者在確認頁選材料表品項後，檢查項目與設計/標準值照材料表，不靠讀字。"""
+    rows = _three(job)
+    forms = job.forms()
+    assert len(forms) >= 10 and all(f[0] and f[1] and f[2] for f in forms)
+    opts = job.form_options(rows[0]["nnn"])
+    assert sorted(i for i, _ in opts) == list(range(len(forms)))
+    for r in rows:                                        # 讀錯的查驗項目：make_entries 自己對不到材料表
+        job.write_text(r["nnn"], BODY.replace("EMT管材料進場", "〈讀錯的字〉材追場"), {"工程名稱": "〈甲〉"})
+    job.addmany()
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    ents = job.make_entries()
+    before = [dict(e) for e in ents]
+    a, b = rows[0]["nnn"], rows[1]["nnn"]
+    ents = job.apply_forms(ents, {a: (3, False), b: (5, True)})
+    assert ents[0]["item"] == forms[3][1] and ents[0]["design"] == [forms[3][0]] + forms[3][2]
+    assert ents[0]["measured"] == before[0]["measured"]              # 沒勾「相符」：實測值不動
+    assert ents[1]["measured"] == ents[1]["design"] == [forms[5][0]] + forms[5][2]
+    assert ents[2] == before[2]                                      # 沒選的照片不動
+    job.save_entries(ents); job.build()
+    assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout
