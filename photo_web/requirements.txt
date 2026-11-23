@@ -5,3 +5,6 @@ pillow>=10
 pillow-heif>=0.16   # iPhone HEIC（log_photo.py 有則使用）
 anthropic>=2.12     # 本機有的版本；讀圖用到 output_config，舊版不支援。 只有設定 ANTHROPIC_API_KEY 才會用到（讀圖費用待 MIKO 最後決定）
 pytest>=8
+rapidocr>=3.10        # 不用金鑰的自動讀字（本機 OCR）；裝不起來時網頁自動改人工抄寫
+onnxruntime>=1.20
+opencc-python-reimplemented>=0.1.7   # OCR 輸出的簡體字形轉繁體

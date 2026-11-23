@@ -204,10 +204,23 @@ class ClaudeReader:
 
 
 def make_reader():
-    """有 PHOTO_FIXTURE 就用固定答案；有 ANTHROPIC_API_KEY 才用 Claude API；都沒有回 None（網頁改人工抄寫）。"""
+    """有 PHOTO_FIXTURE 就用固定答案；有 ANTHROPIC_API_KEY 用 Claude API；否則用本機 OCR（不用金鑰）；
+    OCR 也不能用（沒裝、模型下載失敗、PHOTO_OCR=0）回 None，網頁改人工抄寫。"""
     fx = os.environ.get("PHOTO_FIXTURE")
     if fx and os.path.exists(fx):
         return FixtureReader(fx)
     if os.environ.get("ANTHROPIC_API_KEY"):
         return ClaudeReader()
-    return None
+    return make_ocr_reader()
+
+
+def make_ocr_reader():
+    if os.environ.get("PHOTO_OCR", "1").strip() == "0":
+        return None
+    try:
+        import ocr_reader
+        return ocr_reader.OcrReader()
+    except Exception:
+        import logging
+        logging.exception("自動讀字（OCR）無法啟用，改人工抄寫")
+        return None

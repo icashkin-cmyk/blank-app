@@ -502,6 +502,29 @@ class Job:
             return {}
         return dict(ln.rstrip("\n").split("：", 1) for ln in open(fpath, encoding="utf-8") if "：" in ln)
 
+    def fixed_options(self) -> dict[str, list[tuple[str, int]]]:
+        """各固定欄位在待寫入照片的讀圖草稿裡出現過的寫法與張數，多的排前面；已有基準（接續上次）時基準排第一。
+        含〔?〕的寫法（沒讀清楚）排最後。"""
+        from collections import Counter
+        todo = {r["nnn"] for r in self.stopped()}
+        base = {r[0]: r[1] for r in self._sheet_rows("基準") if r and r[0] in FIXED_FIELDS and r[1]} if os.path.exists(self.p(WORKBOOK)) else {}
+        out = {}
+        for f in FIXED_FIELDS:
+            c = Counter(v[f].strip() for n, v in self.draft_fixed.items() if n in todo and v.get(f, "").strip())
+            opts = sorted(c.items(), key=lambda kv: ("〔?" in kv[0], -kv[1]))
+            if base.get(f):
+                opts = [(base[f], c.get(base[f], 0))] + [o for o in opts if o[0] != base[f]]
+            out[f] = opts
+        return out
+
+    def fixed_for(self, nnn: str, confirmed: dict[str, str]) -> dict[str, str]:
+        """這一張要寫入的固定欄位：使用者在確認頁確認過的整批值。
+        有讀圖草稿時，只給「這張照片上讀得到該欄」的照片（照片上沒有的欄位不帶入）；沒有讀圖（人工抄寫）時每張都用確認值。"""
+        if not self.draft_fixed:
+            return dict(confirmed)
+        mine = self.draft_fixed.get(nnn, {})
+        return {f: v for f, v in confirmed.items() if mine.get(f, "").strip()}
+
     def draft(self, nnn: str) -> str:
         """第 2 步文字框的預設內容：讀圖草稿，沒有就用空白範本。"""
         return self.drafts.get(nnn) or self.template(nnn)

@@ -1,4 +1,4 @@
-"""photo_web/app.py｜上傳照片 → 讀圖草稿逐張核對 → 既有腳本產出「材料自主檢查照片.xlsx」。
+"""photo_web/app.py｜上傳照片 → 自動讀字草稿、一頁確認（可全選）→ 既有腳本產出「材料自主檢查照片.xlsx」。
 執行：streamlit run photo_web/app.py
 讀圖（reader.py）有固定答案、Claude API、人工抄寫三種；規則照 photo-inspection-log SKILL.md。"""
 import logging
@@ -22,7 +22,7 @@ PRIVACY = (f"照片只存在本次工作的暫存資料夾：按左側「結束�
            f"閒置超過 {HOURS} 小時後，在下一次有人開啟這個網頁時清除。（手機請點左上角展開側欄。）"
            "有設每日上限時，登入者的 email 與當日張數會記在伺服器，隔天起有人開啟這個網頁時清除。")
 LIMIT_NOTE = "處理中請不要重新整理或更換檔案；中斷時沒用到的額度會退回，已送出讀圖的張數仍計入。"
-st.caption(f"依 photo-inspection-log 既有腳本產出公司格式 Excel。腳本版本：{pl.skill_source()}。" + PRIVACY)
+st.caption("上傳查驗照片，自動讀出照片上的字，確認後產出公司格式的「材料自主檢查照片.xlsx」。")
 
 
 @st.cache_resource(show_spinner="下載 Skill 腳本…")
@@ -39,7 +39,17 @@ S = st.session_state
 S.setdefault("job", None)
 S.setdefault("stage", "upload")
 S.setdefault("notes", {})
-READER = rd.make_reader()
+@st.cache_resource(show_spinner="準備自動讀字（第一次要下載模型，約一分鐘）…")
+def _reader():
+    return rd.make_reader()
+
+
+@st.cache_resource(show_spinner="準備自動讀字…")
+def _ocr_reader():
+    return rd.make_ocr_reader()
+
+
+READER = _reader()
 USAGE = pl.Usage()                                    # 側欄的 reset() 會用到，要先定義（第四輪稽核：NameError）
 if S.job and not S.job.alive():                       # 工作資料夾已不在（閒置太久被清除）
     S.job, S.stage = None, "upload"
@@ -98,9 +108,9 @@ def fail_upload(msg: str):
 
 with st.sidebar:
     st.subheader("進度")
-    for key, label in [("upload", "1 上傳照片"), ("text", "2 抄寫白板"), ("confirm", "3 確認基準與分項"),
-                       ("entries", "4 填欄位"), ("done", "5 產出與下載")]:
+    for key, label in [("upload", "1 上傳照片"), ("review", "2 確認內容"), ("done", "3 下載")]:
         st.write(("▶ " if S.stage == key else "　") + label)
+    st.caption(f"腳本版本：{pl.skill_source()}")
     if S.job:
         st.divider()
         if st.button("結束並刪除暫存", type="secondary"):
@@ -155,8 +165,9 @@ if ALLOWED:
 if READER and READER.name == "Claude API" and not pl.paid_reading_allowed(ALLOWED, DAILY):
     # 會產生費用的讀圖要同時有使用者名單與每日上限才啟用，避免任何人、無上限地用金鑰
     st.warning("已設定 Claude API 金鑰，但沒有同時設定使用者名單（PHOTO_ALLOWED_EMAILS）與每日上限（PHOTO_DAILY_LIMIT），"
-               "為避免費用失控，這次改用人工抄寫。")
-    READER = None
+               "為避免費用失控，這次改用不需金鑰的自動讀字。")
+    READER = _ocr_reader()
+
 
 def page():
     global READER
@@ -201,126 +212,131 @@ def page():
                         READER, on_photo=lambda i, n: bar.progress(i / max(n, 1), text=f"讀圖中（{READER.name}）第 {i + 1}／{n} 張…"))
                 bar.progress(1.0, text="完成")                 # 使用者已離開時從這裡停下，不會走到結清
                 S.job.settle(USAGE, len(S.job.stopped()))     # 只算實際新增的張數（重複的不算）
-            S.stage = "text"; st.rerun()
+            S.stage = "review"; st.rerun()
 
     job = S.job
 
-    # ---------- 2 抄寫 ----------
-    if S.stage == "text":
-        st.header("2 抄寫白板")
-        st.info("只寫這張照片上看得到的字；看不清寫〔?〕；不要從其他照片、記憶或材料表補字。"
-                "量測照片先讀刻度或螢幕，再和白板比對。前兩行必須是「查驗時間：」「照片日期：」。"
-                "「（意象：…）」是照片內容描述，不是照片上的字。")
-        st.caption(f"讀圖方式：{READER.name if READER else '人工抄寫（未設定讀圖）'}")
-        show_result(job.log[-1])
+    # ---------- 2 確認內容（一頁）----------
+    if S.stage == "review":
+        st.header("2 確認內容")
         todo = job.stopped()
-        if not todo:
-            S.stage = "confirm"; st.rerun()
-        for r in todo:
-            nnn = r["nnn"]
-            st.subheader(f"第 {int(nnn)} 張｜{r['原檔名']}｜狀態 {r['狀態']}")
-            c1, c2 = st.columns([3, 2])
-            with c1:
-                st.image(job.p("photos", f"{nnn}_grid.jpg"), use_container_width=True)
-            with c2:
-                val = job.draft(nnn)                          # 讀圖草稿只在記憶體，勾選後才寫檔
-                for w in S.notes.get(r["原檔名"], []):
-                    st.warning(w)
-                st.text_area("照片文字（工作檔格式；讀圖草稿請逐字核對）", value=val, height=320, key=f"t{nnn}")
-                have = job.fixed(nnn) or job.draft_fixed.get(nnn, {})
-                with st.expander("固定欄位（照片上有才填）", expanded=bool(have)):
-                    for f in pl.FIXED_FIELDS:
-                        st.text_input(f, value=have.get(f, ""), key=f"f{nnn}{f}")
-                st.checkbox("我已看過這張照片，內容只寫照片上看得到的字", key=f"ok{nnn}")
-        if st.button("寫入勾選的照片", type="primary"):
-            n = 0
+        how = READER.name if READER else "人工抄寫（沒有可用的自動讀字）"
+        if READER and READER.name.startswith("自動讀字"):
+            st.info("照片上的字已自動讀成草稿。印刷字大多讀得到，手寫字常讀錯或讀不到：請對照照片改正，"
+                    "看不清的留〔?〕（Excel 會標成待確認）。每張看過後打勾，或用「全選」。")
+        else:
+            st.info("只寫照片上看得到的字；看不清寫〔?〕。前兩行必須是「查驗時間：」「照片日期：」。每張看過後打勾，或用「全選」。")
+        st.caption(f"讀字方式：{how}")
+        if S.get("review_err"):
+            st.error(S.pop("review_err"))
+        if todo:
+            # 固定欄位：整批共用，預設取各張讀到的多數寫法；使用者在這裡確認一次（各張寫法不同時不再逐張擋下）
+            st.subheader("工程資料（整批共用，確認一次）")
+            opts = job.fixed_options()
+            cols = st.columns(3)
+            for c, f in zip(cols, pl.FIXED_FIELDS):
+                with c:
+                    st.text_input(f, value=(opts[f][0][0] if opts[f] else ""), key=f"fx{f}")
+                    if len(opts[f]) > 1:
+                        st.caption("各張讀到的寫法不同：" + "；".join(f"「{v}」{n} 張" for v, n in opts[f]) + "。請確認上面這一個。")
+            st.subheader(f"照片（{len(todo)} 張）")
+
+            def _all():
+                for r in job.stopped():
+                    S[f"ok{r['nnn']}"] = S.all_ok
+            st.checkbox("全選：下面每一張我都看過了", key="all_ok", on_change=_all)
             for r in todo:
                 nnn = r["nnn"]
-                if S.get(f"ok{nnn}"):
-                    job.write_text(nnn, S[f"t{nnn}"], {f: S.get(f"f{nnn}{f}", "") for f in pl.FIXED_FIELDS}); n += 1
-            if not n:
-                st.warning("沒有勾選任何照片。"); st.stop()
-            guard(job.addmany)
-            st.rerun()
-        st.caption("沒讀完的照片不要勾選；全部寫入後才會進到下一步（交檔檢查會擋下未寫入的照片）。")
-
-    # ---------- 3 確認 ----------
-    if S.stage == "confirm":
-        st.header("3 確認基準與分項工程名稱")
-        show_result(job.log[-1])
-        pend = job.pending_base()
-        if pend:
-            st.subheader("新基準（第一次出現的固定欄位，確認後才寫入基準）")
-            for k, v, src in [(r + (None, None))[:3] for r in pend]:
-                st.checkbox(f"新基準：{k}＝{v}（來源：{src}）", key=f"b{k}")
-        st.subheader("分項工程名稱（白板沒有，請自行填；不知道可留空）")
-        items = guard(job.items)
-        for it in items:
-            st.text_input(f"查驗項目「{it}」的分項工程名稱", key=f"s{it}")
-        if st.button("下一步", type="primary"):
-            keys = [r[0] for r in pend if S.get(f"b{r[0]}")]
-            if keys:
-                guard(job.confirm_base, keys)
-            for it in items:
-                if S.get(f"s{it}", "").strip():
-                    guard(job.set_sub, it, S[f"s{it}"].strip())
-            S.entries = job.apply_suggestions(guard(job.make_entries))
-            S.stage = "entries"; st.rerun()
-
-    # ---------- 4 填欄位 ----------
-    if S.stage == "entries":
-        st.header("4 填欄位")
-        st.info("設計/標準值：對得到材料表就用材料表的品質管理標準（第一行寫材料名稱）；對不到用白板規格。"
-                "實測值：白板或量測照片有才寫，沒有就留空（Excel 只留標籤）。")
-        for i, e in enumerate(S.entries):
-            st.subheader(f"第 {i + 1} 筆｜{e['_sheet']} 第 {e['_row']} 列")
-            c1, c2 = st.columns([2, 3])
-            with c1:
-                if e.get("photo"):
-                    st.image(job.p(e["photo"]), use_container_width=True)
-            with c2:
-                st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec")
-                st.text_input("檢查項目", value=e["item"], key=f"e{i}item")
-                st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150)
-                st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100)
-                st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg")
+                st.markdown(f"**第 {int(nnn)} 張**")
+                st.caption(r["原檔名"])
+                c1, c2 = st.columns([3, 2])
+                with c1:
+                    st.image(job.p("photos", f"{nnn}_grid.jpg"), use_container_width=True)
+                with c2:
+                    for w in S.notes.get(r["原檔名"], []):
+                        st.caption("⚠ " + w)
+                    st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed")
+                    st.checkbox("我看過這一張了", key=f"ok{nnn}")
+        else:
+            st.success("這次沒有新照片要確認，可以直接產出。")
         if st.button("產出 Excel", type="primary"):
-            for i, e in enumerate(S.entries):
-                e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()
-                e["design"] = [s for s in S[f"e{i}design"].splitlines() if s.strip()]
-                e["measured"] = [s for s in S[f"e{i}measured"].splitlines() if s.strip()]
+            miss = [int(r["nnn"]) for r in todo if not S.get(f"ok{r['nnn']}")]
+            if miss:
+                st.warning(f"還有 {len(miss)} 張沒打勾（第 {'、'.join(map(str, miss))} 張）。看過後逐張打勾，或勾「全選」。"); st.stop()
+            fx = {f: S.get(f"fx{f}", "").strip() for f in pl.FIXED_FIELDS}
+            for r in todo:
+                nnn = r["nnn"]
+                job.write_text(nnn, S[f"t{nnn}"], job.fixed_for(nnn, fx))
+            if todo:
+                res = guard(job.addmany)
+                left = job.stopped()
+                if left:                                      # 還有寫不進去的：說明原因，留在這一頁改
+                    why = [ln for ln in res.stdout.splitlines() if ln.startswith("未寫入：")]
+                    S.review_err = (f"有 {len(left)} 張沒有寫入，請照說明修改後再按一次「產出 Excel」：\n\n"
+                                    + "\n".join(f"- {pl.sanitize(w, job.dir)}" for w in why))
+                    st.rerun()
+            if job.pending_base():
+                guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
+            S.entries = job.apply_suggestions(guard(job.make_entries))
             job.save_entries(S.entries)
             guard(job.build)
             guard(job.preflight_deliver)
+            job.pdf = None
             S.stage = "done"; st.rerun()
 
-    # ---------- 5 產出 ----------
+    # ---------- 3 下載 ----------
     if S.stage == "done":
-        st.header("5 產出與下載")
-        for r in job.log[-2:]:
-            show_result(r)
-        st.success("交檔檢查全部 PASS。")
+        st.header("3 下載")
+        st.success("Excel 已產出，交檔檢查全部 PASS。")
         ents = S.get("entries") or []
         todo_notes = []
         n_sec = sum(1 for e in ents if not e["sec"]); n_item = sum(1 for e in ents if not e["item"])
         n_q = sum(ln.count("〔?") for e in ents for ln in e["design"] + e["measured"])
-        if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆")
+        if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆（白板上沒有這一欄，要填請用下面的「修改欄位」）")
         if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
-        if n_q: todo_notes.append(f"看不清的字〔?〕：{n_q} 處（請對照原照片確認後，下次上傳這份 Excel 接續修改）")
-        todo_notes += [ln for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")]
-        if todo_notes:
-            st.warning("交檔前請留意：\n\n" + "\n".join(f"- {t}" for t in todo_notes))
+        if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以紅字標出）")
+        n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})
+        if n_long: todo_notes.append(f"內容較長：{n_long} 筆已加高列高完整顯示（沒有截行、沒有縮字），列印前請看一下版面")
         st.download_button("下載 材料自主檢查照片.xlsx", job.output_bytes(), file_name=pl.OUTPUT, type="primary",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        st.download_button("下載 交檔檢查紀錄.txt", job.check_report().encode("utf-8"), file_name="交檔檢查紀錄.txt", mime="text/plain")
-        if st.button("產生 PDF 預覽"):
-            job.pdf = job.to_pdf() or b""             # 綁在這個工作上：換工作不會拿到上一份的 PDF
-        if getattr(job, "pdf", None):                     # 按下載後頁面重跑，按鈕還在
-            st.download_button("下載 PDF 預覽", job.pdf, file_name="材料自主檢查照片.pdf", mime="application/pdf")
-        elif getattr(job, "pdf", None) == b"":
-            st.warning("這個環境沒有 LibreOffice，無法轉 PDF。")
-        st.caption("下次接續請上傳這次的材料自主檢查照片.xlsx。接續時照片與原文會帶回來；"
-               "第 4 步手動改過的欄位不會帶回，需要再確認一次。")
+        if todo_notes:
+            st.warning("交檔前請留意：\n\n" + "\n".join(f"- {t}" for t in todo_notes))
+        with st.expander("修改欄位後重新產出（選用）"):
+            for i, e in enumerate(ents):
+                st.markdown(f"**第 {i + 1} 筆**")
+                c1, c2 = st.columns([2, 3])
+                with c1:
+                    if e.get("photo"):
+                        st.image(job.p(e["photo"]), use_container_width=True)
+                with c2:
+                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec")
+                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item")
+                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150)
+                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100)
+                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg")
+            if st.button("重新產出 Excel"):
+                for i, e in enumerate(ents):
+                    e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()
+                    e["design"] = [x for x in S[f"e{i}design"].splitlines() if x.strip()]
+                    e["measured"] = [x for x in S[f"e{i}measured"].splitlines() if x.strip()]
+                job.save_entries(ents)
+                guard(job.build)
+                guard(job.preflight_deliver)
+                job.pdf = None
+                st.rerun()
+        with st.expander("其他下載與檢查紀錄"):
+            st.download_button("下載 交檔檢查紀錄.txt", job.check_report().encode("utf-8"), file_name="交檔檢查紀錄.txt", mime="text/plain")
+            if st.button("產生 PDF 預覽"):
+                job.pdf = job.to_pdf() or b""             # 綁在這個工作上：換工作不會拿到上一份的 PDF
+            if getattr(job, "pdf", None):
+                st.download_button("下載 PDF 預覽", job.pdf, file_name="材料自主檢查照片.pdf", mime="application/pdf")
+            elif getattr(job, "pdf", None) == b"":
+                st.warning("這個環境沒有 LibreOffice，無法轉 PDF。")
+            for r in job.log[-2:]:
+                show_result(r)
+        st.caption("下次接續：在第 1 步上傳這次的材料自主檢查照片.xlsx，照片與原文會帶回來；用「修改欄位」改過的內容不會帶回。")
+        if st.button("結束並刪除暫存，處理下一批"):
+            reset(); st.rerun()
 
 
 try:
