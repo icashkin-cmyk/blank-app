@@ -548,12 +548,19 @@ class Job:
         只差幾個字（讀錯字）不算；沒讀清楚（〔?〕）的寫法去掉標記後字數太少也不比。"""
         import difflib
 
-        def split(x: str) -> tuple[str, str, str]:         # (去掉〔?〕的全名, 去掉常見後綴的核心, 去掉的後綴)
-            x = (x or "").replace(Q_MARK, "").strip()
-            for suf in SUFFIXES:
-                if x.endswith(suf) and len(x) - len(suf) >= 2:
-                    return x, x[:-len(suf)], suf
-            return x, x, ""
+        def suffix(x: str) -> str:
+            return next((suf for suf in SUFFIXES if x.endswith(suf) and len(x) - len(suf) >= 2), "")
+
+        def cores(p: str, q: str) -> tuple[str, str] | None:
+            """兩邊都讀到完整後綴時回傳去掉後綴的核心；一邊的後綴是另一邊的尾段時（有限公司／股份有限公司），兩邊都去掉較短的那個。
+            任一邊後綴沒讀完整（讀錯字）就回傳 None，只比全名。"""
+            sp, sq = suffix(p), suffix(q)
+            if not sp or not sq:
+                return None
+            if sp != sq and (sp.endswith(sq) or sq.endswith(sp)):
+                sp = sq = min(sp, sq, key=len)
+            return p[:-len(sp)], q[:-len(sq)]
+        strip = lambda x: (x or "").replace(Q_MARK, "").strip()
         ratio = lambda p, q: difflib.SequenceMatcher(None, p, q).ratio()
         out: dict[str, list[tuple[str, str]]] = {}
         todo = {r["nnn"] for r in self.stopped()}
@@ -561,14 +568,13 @@ class Job:
             if nnn not in todo:
                 continue
             for f in FIXED_FIELDS:
-                want, wcore, wsuf = split(confirmed.get(f))
-                got, gcore, gsuf = split(v.get(f))
+                want, got = strip(confirmed.get(f)), strip(v.get(f))
                 if len(want) < 2 or len(got) < 2:
                     continue
-                # 全名差很多；或兩邊讀到同一個完整後綴、沒有〔?〕、而核心完全對不上（「○○建築師事務所」之間後綴相同會把不同公司算成相似）。
-                # 後綴被讀錯或有〔?〕時只比全名，避免把同一家公司誤報（2026-11-23 稽核第 3 輪）。
-                clean = bool(wsuf) and wsuf == gsuf and Q_MARK not in (v.get(f) or "")   # 兩邊去掉的是同一個後綴才比核心
-                if ratio(want, got) < MISMATCH_RATIO or (clean and ratio(wcore, gcore) < 0.34):
+                # 全名差很多；或兩邊都讀到完整後綴、沒有〔?〕、而核心完全對不上（「○○建築師事務所」之間後綴相同會把不同公司算成相似）。
+                # 後綴被讀錯或有〔?〕時只比全名，避免把同一家公司誤報（2026-11-23 稽核第 3～5 輪）。
+                c = cores(want, got) if Q_MARK not in (v.get(f) or "") else None
+                if ratio(want, got) < MISMATCH_RATIO or (c and ratio(*c) < 0.34):
                     out.setdefault(nnn, []).append((f, v[f].strip()))
         return out
 

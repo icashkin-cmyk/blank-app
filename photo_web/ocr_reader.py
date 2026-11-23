@@ -53,29 +53,37 @@ class Box:
 
 
 _cc = None
+_t2s = None
+
+
+STAY = "温着"                              # 臺灣也在用（姓氏、異體）但下列兩個判斷都抓不到的字：不動
 
 
 def _simp_only(ch: str) -> bool:
-    """是不是「只會是簡體」的字：Big5 沒收的字（这、规、进、个、灯），或 FORCE 內的字。"""
+    """是不是「只會是簡體」的字：FORCE 內的字；或同時符合「cp950（Big5 含擴充字）沒收」與「本身不是繁體字形」
+    （OpenCC 繁→簡會改它的字就是繁體字形，例 啓、峯、裏、羣、衆：這些是異體，不是簡體，不動）。"""
     if ch in FORCE:
         return True
+    if ch in STAY:
+        return False
     try:
-        ch.encode("big5")
+        ch.encode("cp950")
         return False
     except UnicodeEncodeError:
-        return True
+        pass
+    return not _t2s or _t2s.convert(ch) == ch
 
 
 def to_trad(s: str) -> str:
-    """簡體字形轉繁體（OCR 模型常輸出簡體）。只轉「只會是簡體」的字，逐字對位；繁體也在用的字一律不動
+    """簡體字形轉繁體（OCR 模型常輸出簡體）。只轉「只會是簡體」的字（判斷見 _simp_only），逐字對位；繁體也在用的字一律不動
     （范、余、于、里、后、斗、杰、制、台、污、游…；人名、地名、材料表用字都不會被改寫。2026-11-23 稽核第 3、4 輪）。
     代價：簡體詞裡這類字會留著（规范→規范、这里→這里、后面→后面），要在確認頁自己改。
     轉換後字數不同（無法逐字對位）或沒裝 opencc 時原樣回傳。"""
-    global _cc
+    global _cc, _t2s
     if _cc is None:
         try:
             import opencc
-            _cc = opencc.OpenCC("s2tw")
+            _cc, _t2s = opencc.OpenCC("s2tw"), opencc.OpenCC("t2s")
         except Exception:
             _cc = False
     if not _cc or not s:

@@ -229,7 +229,11 @@ def test_traditional_words_are_never_rewritten():
     # 稽核第 4 輪：跨詞、人名、姓氏後面接簡體字，都不得改到繁體也在用的字；只轉只會是簡體的字
     names = ["管制作業", "交通管制作業", "控制作動", "管制品", "公里面積", "皇后面前", "王志杰", "林志杰", "胡适", "柜台", "李宁", "种師道", "杰出"]
     assert [w for w in names if oc.to_trad(w) != w] == []
-    assert oc.to_trad("范国昌建築師事務所") == "范國昌建築師事務所" and oc.to_trad("余国华") == "余國華"
+    assert oc.to_trad("范大同营造有限公司") == "范大同營造有限公司" and oc.to_trad("余国华") == "余國華"
+    # 稽核第 5 輪：Big5 擴充字與臺灣也在用的異體字（人名、公司名常見）不得被正規化
+    same = ["江啓臣", "林恒毅", "恒壓泵", "恒春鎮", "德峯", "温先生", "裏", "着", "嫺", "羣", "衆", "啓明"]
+    assert [w for w in same if oc.to_trad(w) != w] == []
+    assert oc.mark("恒", 0.99) == "恒"
     assert oc.to_trad("于国栋") == "于國棟" and oc.to_trad("涂庆文") == "涂慶文"
     assert oc.to_trad("规范 这里 后面 制造") == "規范 這里 后面 制造"          # 已揭露的限制：這類字留著，由使用者在確認頁改
     assert oc.to_trad("掛式便斗 规格") == "掛式便斗 規格" and oc.to_trad("污排水管材料进场") == "污排水管材料進場"   # 同一格裡混著簡體字也不改壞

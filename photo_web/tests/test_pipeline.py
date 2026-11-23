@@ -689,6 +689,11 @@ def test_misread_suffix_of_same_company_is_not_flagged(job):
                        b: {"監造單位": "甲乙丙建築師事〔?〕", "承造單位": "東南營造有限公"},
                        c: {"監造單位": "甲乙丙建築帥事務", "承造單位": "東商菅造有限公司"}}      # 兩邊去掉的後綴不同：不比核心（稽核第 4 輪建議 2）
     assert job.fixed_mismatch(ok) == {}
+    job.draft_fixed = {a: {"承造單位": "東商營造有限公司"}}                # 同後綴、核心讀錯 1 字：不算
+    assert job.fixed_mismatch(ok) == {}
+    # 稽核第 5 輪建議 1：後綴不同的別家公司也要指出（一邊的後綴是另一邊的尾段時，去掉較短的那個再比）
+    job.draft_fixed = {a: {"承造單位": "西北營造股份有限公司"}, b: {"監造單位": "丁戊己聯合建築師事務所"}}
+    assert job.fixed_mismatch(ok) == {a: [("承造單位", "西北營造股份有限公司")], b: [("監造單位", "丁戊己聯合建築師事務所")]}
 
 
 def test_same_as_form_keeps_board_measurements(job):
