@@ -590,11 +590,11 @@ def test_other_project_photo_is_flagged(job):
     """必修 2：某張讀到的工程資料和整批確認的值差很多（可能是別的工程）要指出是哪一張；只差一兩個字（讀錯字）不算。"""
     rows = _three(job)
     a, b, c = (r["nnn"] for r in rows)
-    job.draft_fixed = {a: {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所"},
-                       b: {"工程名稱": "〈甲〉市文化國區二湖改造工程〔?〕", "監造單位": "〔?〕"},
-                       c: {"工程名稱": "測試市甲乙大樓新建工程", "監造單位": "〈乙〉建築師事務所"}}
-    ok = {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所", "承造單位": ""}
-    assert job.fixed_mismatch(ok) == {c: [("工程名稱", "測試市甲乙大樓新建工程")]}
+    job.draft_fixed = {a: {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "甲乙丙建築師事務所"},
+                       b: {"工程名稱": "測試市東西南比館舍增建工種〔?〕", "監造單位": "〔?〕"},
+                       c: {"工程名稱": "範例縣某某國小校舍拆除工程", "監造單位": "甲乙丙建築師事務所"}}
+    ok = {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "甲乙丙建築師事務所", "承造單位": ""}
+    assert job.fixed_mismatch(ok) == {c: [("工程名稱", "範例縣某某國小校舍拆除工程")]}
 
 
 def test_drop_photo_excludes_it_from_output(job):
@@ -634,3 +634,47 @@ def test_chosen_material_form_fills_item_and_design(job):
     assert ents[2] == before[2]                                      # 沒選的照片不動
     job.save_entries(ents); job.build()
     assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout
+
+
+def test_other_company_with_common_suffix_is_flagged(job):
+    """稽核第 2 輪建議 1：公司名共用「建築師事務所」「營造有限公司」這類後綴時，不同公司也要被指出。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    job.draft_fixed = {a: {"監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"},
+                       b: {"監造單位": "甲乙西建築師事務所", "承造單位": "東南營造有限公司"},      # 讀錯一個字：不算
+                       c: {"監造單位": "虛構建築師事務所", "承造單位": "範例營造有限公司"}}
+    ok = {"工程名稱": "", "監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"}
+    assert job.fixed_mismatch(ok) == {c: [("監造單位", "虛構建築師事務所"), ("承造單位", "範例營造有限公司")]}
+
+
+def test_fixed_defaults_follow_remaining_photos_after_drop(job):
+    """稽核第 2 輪必修 1：拿掉照片後，工程資料的預設要依剩下的照片重算；被拿掉那張的值不得留著。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    job.draft_fixed = {a: {"工程名稱": "測試市東西南北館舍增建工程"}, b: {"工程名稱": "測試市東西南北館舍增建工程"},
+                       c: {"工程名稱": "範例縣某某國小校舍拆除工程", "承造單位": "範例營造有限公司"}}
+    assert job.fixed_defaults() == {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "", "承造單位": "範例營造有限公司"}
+    job.drop(c)
+    assert job.fixed_defaults() == {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "", "承造單位": ""}
+
+
+def test_control_characters_do_not_break_writing(job):
+    """稽核第 2 輪建議 5：貼上的文字帶控制字元時不得整批寫入失敗。"""
+    rows = _three(job)
+    for i, r in enumerate(rows):
+        job.write_text(r["nnn"], BODY.replace("〈規格〉", "E19\x07\x0b" if i == 0 else "E25"), {"工程名稱": "測試工程\x08"})
+    job.addmany()
+    assert job.stopped() == []
+    assert "交檔結果：全部 PASS" in _produce(job).stdout
+
+
+def test_strings_only_keeps_rich_text_of_hidden_sheets(job):
+    """稽核第 2 輪建議 2：有公式格而重存時，隱藏「原文」分頁的紅字標記不得被壓平。"""
+    from openpyxl.cell.rich_text import CellRichText
+    rows = _three(job)
+    for i, r in enumerate(rows):
+        job.write_text(r["nnn"], BODY.replace("〈規格〉", "E1〔?〕9") if i else BODY.replace("EMT管 〈規格〉｜〈數量〉", "=1+1"), {"工程名稱": "測試工程"})
+    job.addmany(); _produce(job)
+    wb = load_workbook(job.p(pl.OUTPUT), rich_text=True)
+    rich = [c for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, CellRichText)]
+    assert rich, "原文分頁的紅字標記不見了"

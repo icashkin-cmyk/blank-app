@@ -235,10 +235,18 @@ def page():
             # 固定欄位：整批共用，預設取各張讀到的多數寫法；使用者在這裡確認一次（各張寫法不同時不再逐張擋下）
             st.subheader("工程資料（整批共用，確認一次）")
             opts = job.fixed_options()
+
+            def _fx_changed():                                # 工程資料一改：先前勾的「是同一個工程」不算數，要重新確認
+                for r in job.stopped():
+                    S.pop(f"same{r['nnn']}", None)
+            if S.get("fixed_note"):
+                st.warning(S.pop("fixed_note"))
             cols = st.columns(3)
             for c, f in zip(cols, pl.FIXED_FIELDS):
                 with c:
-                    st.text_input(f, value=(opts[f][0][0] if opts[f] else ""), key=f"fx{f}", max_chars=200)
+                    if f"fx{f}" not in S:
+                        S[f"fx{f}"] = opts[f][0][0] if opts[f] else ""
+                    st.text_input(f, key=f"fx{f}", max_chars=200, on_change=_fx_changed)
                     if not opts[f]:
                         st.caption("照片上沒讀到這一欄；知道的話可以自己填（會記在這一批），不知道就留空。")
                     elif len(opts[f]) > 1:
@@ -263,7 +271,17 @@ def page():
                 try:
                     job.drop(nnn)
                 except pl.PipelineError as e:
-                    S.review_err = str(e)
+                    S.review_err = str(e); return
+                for k in (f"ok{nnn}", f"same{nnn}", f"t{nnn}", f"form{nnn}", f"fsame{nnn}"):
+                    S.pop(k, None)
+                new = job.fixed_defaults()                    # 工程資料依剩下的照片重取：被拿掉那張的值不得留著（稽核第 2 輪必修 1）
+                changed = [f for f in pl.FIXED_FIELDS if S.get(f"fx{f}", "") != new[f]]
+                for f in pl.FIXED_FIELDS:
+                    S[f"fx{f}"] = new[f]
+                if changed:
+                    _fx_changed()
+                    S.fixed_note = (f"已拿掉第 {int(nnn)} 張。上面的工程資料（{'、'.join(changed)}）已依剩下的照片重新帶入，"
+                                    "你先前在這幾欄改過的字也一併重設，請再確認一次。")
                 _one()
             st.checkbox("全選：下面每一張我都看過了", key="all_ok", on_change=_all)
             for r in todo:
@@ -281,7 +299,7 @@ def page():
                                  + "，和上面確認的不一樣。產出時這一張會記成上面的工程資料。")
                         st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
-                                 max_chars=pl.MAX_TEXT)
+                                 max_chars=max(pl.MAX_TEXT, len(job.draft(nnn))))
                     if job.forms():                           # 材料表品項：用選的，不靠讀字
                         fo = dict(job.form_options(nnn))
                         st.selectbox("材料表品項（選用）", [-1] + list(fo), key=f"form{nnn}",
@@ -334,7 +352,7 @@ def page():
         n_q = sum(ln.count("〔?") for e in ents for ln in e["design"] + e["measured"])
         if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆（白板上沒有這一欄，要填請用下面的「修改欄位」）")
         if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
-        if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以紅字標出）")
+        if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以〔?1〕〔?2〕這樣的編號標出）")
         if READER and READER.name.startswith("自動讀字"):
             todo_notes.append("內容是自動讀字的草稿加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
         n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})

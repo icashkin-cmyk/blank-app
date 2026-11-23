@@ -43,6 +43,8 @@ TEXT_FIELDS = ["查驗時間", "照片日期", "查驗項目", "位置", "檢查
 FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
 Q_MARK = "〔?〕"
 MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
+SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
 
 
@@ -493,9 +495,9 @@ class Job:
         if row is None:
             raise PipelineError(f"manifest 沒有第 {nnn} 張")
         path = self.p("text", f"{nnn}.txt")
-        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{body.strip()}\n")
+        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{CTRL.sub('', body).strip()}\n")
         given = fixed is not None
-        fixed = {k: v.strip() for k, v in (fixed or {}).items() if v and v.strip()}
+        fixed = {k: CTRL.sub("", v).strip() for k, v in (fixed or {}).items() if v and CTRL.sub("", v).strip()}
         fpath = self.p("fixed", f"{nnn}.txt")
         if fixed:
             os.makedirs(self.p("fixed"), exist_ok=True)
@@ -525,6 +527,10 @@ class Job:
             out[f] = opts
         return out
 
+    def fixed_defaults(self) -> dict[str, str]:
+        """確認頁工程資料三欄的預設值：依「現在還在這一批」的照片取（拿掉照片後要重算）。"""
+        return {f: (o[0][0] if o else "") for f, o in self.fixed_options().items()}
+
     def fixed_for(self, nnn: str, confirmed: dict[str, str]) -> dict[str, str]:
         """這一張要寫入的固定欄位：使用者在確認頁確認過的整批值。
         有讀圖草稿時：這張照片上讀得到的欄位用確認值（照片上沒有、別張才有的欄位不帶入）；
@@ -541,14 +547,20 @@ class Job:
         """哪幾張讀到的固定欄位和整批確認的值「差很多」（可能是別的工程的照片）：{nnn: [(欄位, 這張讀到的寫法)]}。
         只差幾個字（讀錯字）不算；沒讀清楚（〔?〕）的寫法去掉標記後字數太少也不比。"""
         import difflib
+
+        def core(x: str) -> str:                           # 去掉〔?〕與常見後綴（「○○建築師事務所」之間後綴相同，會把不同公司算成相似）
+            x = (x or "").replace(Q_MARK, "").strip()
+            for suf in SUFFIXES:
+                if x.endswith(suf) and len(x) - len(suf) >= 2:
+                    return x[:-len(suf)]
+            return x
         out: dict[str, list[tuple[str, str]]] = {}
         todo = {r["nnn"] for r in self.stopped()}
         for nnn, v in self.draft_fixed.items():
             if nnn not in todo:
                 continue
             for f in FIXED_FIELDS:
-                want = (confirmed.get(f) or "").replace(Q_MARK, "").strip()
-                got = (v.get(f) or "").replace(Q_MARK, "").strip()
+                want, got = core(confirmed.get(f)), core(v.get(f))
                 if len(want) < 2 or len(got) < 2:
                     continue
                 if difflib.SequenceMatcher(None, want, got).ratio() < MISMATCH_RATIO:
@@ -725,7 +737,7 @@ class Job:
     def strings_only(self) -> int:
         """產出檔裡不得有公式：照片或使用者的字以「=」開頭時會被寫成公式（2026-11-23 稽核），這裡一律改回文字，字本身不動。
         公司範本沒有公式（有的話這一步會把它變成文字，交檔檢查與測試會看得到）。回傳改了幾格。"""
-        wb = load_workbook(self.p(OUTPUT))
+        wb = load_workbook(self.p(OUTPUT), rich_text=True)   # rich_text：隱藏「原文」分頁的紅字標記重存後要留著
         n = 0
         for ws in wb:
             for row in ws.iter_rows():
