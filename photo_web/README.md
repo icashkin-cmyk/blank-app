@@ -64,7 +64,6 @@ pip install -r photo_web/requirements.txt
 streamlit run photo_web/app.py
 PHOTO_SKILL_DIR=<miko>/skills/photo-inspection-log/scripts python3 -m pytest -q photo_web/tests
 ```
-- 設了 `PHOTO_SKILL_DIR` 時 `test_download_matches_pinned_commit` 會失敗（本機腳本比固定 commit 新），到 `SKILL_COMMIT` 更新為止。
-- 目前 `pipeline.SKILL_COMMIT` 固定在舊版腳本；photo-inspection-log v0.23（make_entries v0.5、build_company v0.6、log_photo v0.17）合併進 miko main 後要改成新的 commit。
-  在那之前，不設 `PHOTO_SKILL_DIR` 跑測試會有 2 項失敗（預期新版腳本的行為），正式部署也會用到舊版腳本。
+- `pipeline.SKILL_COMMIT` 固定在 photo-inspection-log v0.23 的稽核版 commit（miko PR #66 的分支上，尚未合併進 main）。合併後請改成 main 上的合併 commit；PR 若關閉且分支刪除，這個 commit 之後可能下載不到。
+- 不設 `PHOTO_SKILL_DIR` 時測試全部通過（需要對外連線的與需要驗收照片的測試，條件不足時略過）。
 - 13 張驗收照片含工地與個人資訊，只放私有專案檔（`PHOTO_FIXTURE_DIR`），不進本公開 repo。

@@ -34,7 +34,7 @@ except Exception:                    # 沒裝，或底層函式庫壞掉：當�
     pillow_heif = None
 
 # 網頁鎖定的 Skill 版本（miko main）。這個 commit 是舊版腳本；photo-inspection-log v0.23 合併進 main 後要改成新的 commit（見 README）。
-SKILL_COMMIT = "a79ddfde2c7eaaaad8da9ada9e0ef15ccfb70a6e"
+SKILL_COMMIT = "6b95d8b455a825e4ed8116e6d2f62020c225cae1"
 SKILL_FILES = ["log_photo.py", "build_company.py", "make_entries.py", "preflight.py", "forms.csv", "材料自主檢查照片_範本.xlsx"]
 RAW_URL = "https://raw.githubusercontent.com/icashkin-cmyk/miko/{commit}/skills/photo-inspection-log/scripts/{name}"
 WORKBOOK = "照片紀錄.xlsx"
