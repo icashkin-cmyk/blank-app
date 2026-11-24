@@ -181,6 +181,14 @@ def page():
         photos = st.file_uploader(f"照片（可多張，或 zip；一次 {pl.MAX_PHOTOS} 張以內，zip 裡的也算）", type=["jpg", "jpeg", "png", "heic", "heif", "webp", "zip"],
                                   accept_multiple_files=True)
         prev = st.file_uploader("接續上次：上傳上次的材料自主檢查照片.xlsx（沒有就不用）", type=["xlsx"])
+        with st.expander("想要更準：用 AI 對話看圖，把結果貼進來（選用，不用金鑰）"):
+            st.markdown("手寫字用自動讀字只有五成左右。做法：把同一批照片丟給 Claude 等 AI 對話，貼上下面第 1 格的那段話；"
+                        "再把 AI 回覆的 JSON 整段貼到第 2 格（或存成 .json 檔上傳）。網頁就用它當草稿，裡面沒有的照片仍用自動讀字。"
+                        "草稿一樣要你在下一步對照照片看過才寫入。")
+            st.caption("1. 複製這段話給 AI（右上角有複製鈕）")
+            st.code(rd.IMPORT_PROMPT, language=None)
+            readtext = st.text_area("2. 貼上 AI 回覆的 JSON", height=140, max_chars=rd.IMPORT_MAX, key="readtext")
+            readfile = st.file_uploader("或上傳 .json 檔（檔名請用英數字）", type=["json"])
         if S.get("upload_err"):
             st.error(S.pop("upload_err"))
         go = S.pop("go", False)
@@ -188,6 +196,13 @@ def page():
         st.button("開始", type="primary", disabled=(not photos) or go, on_click=lambda: S.update(go=True))
         if go and photos:
             files = [(p.name, p.getvalue()) for p in photos]
+            use = READER
+            raw = readtext.strip().encode("utf-8") if readtext.strip() else (readfile.getvalue() if readfile is not None else b"")
+            if raw:                                           # 匯入的讀圖結果：先檢查格式，不合就不收件
+                try:
+                    use = rd.ImportedReader(rd.parse_import(raw), fallback=_ocr_reader())
+                except ValueError as e:
+                    fail_upload(str(e))
             n_photos = guard_upload(pl.count_photos, files)   # zip 裡的也算（稽核：上限可用 zip 繞過）
             if n_photos > pl.MAX_PHOTOS:
                 fail_upload(f"共 {n_photos} 張，超過一次 {pl.MAX_PHOTOS} 張的上限，請分批上傳。")
@@ -208,9 +223,12 @@ def page():
                 S.add_note = next((ln for ln in added.stdout.splitlines() if ln.startswith("OK 新增")), "")
                 if not S.job.stopped() and not prev:
                     fail_upload("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。")
-                if READER:
+                S.how = use.name if use else ""
+                if use:
                     S.notes = S.job.auto_read(
-                        READER, on_photo=lambda i, n: bar.progress(i / max(n, 1), text=f"讀圖中（{READER.name}）第 {i + 1}／{n} 張…"))
+                        use, on_photo=lambda i, n: bar.progress(i / max(n, 1), text=f"讀圖中（{use.name}）第 {i + 1}／{n} 張…"))
+                    for name in getattr(use, "missed", []):   # 讀圖檔裡沒有的照片：說清楚這張是自動讀字或要人工
+                        S.notes.setdefault(name, []).insert(0, "讀圖檔裡沒有這一張" + ("，改用自動讀字" if use.fallback else "，請人工抄寫"))
                 bar.progress(1.0, text="完成")                 # 使用者已離開時從這裡停下，不會走到結清
                 S.job.settle(USAGE, len(S.job.stopped()))     # 只算實際新增的張數（重複的不算）
             S.stage = "review"; st.rerun()
@@ -221,8 +239,11 @@ def page():
     if S.stage == "review":
         st.header("2 確認內容")
         todo = job.stopped()
-        how = READER.name if READER else "人工抄寫（沒有可用的自動讀字）"
-        if READER and READER.name.startswith("自動讀字"):
+        how = S.get("how") or "人工抄寫（沒有可用的自動讀字）"
+        if how.startswith("匯入的讀圖檔"):
+            st.info("草稿來自你匯入的讀圖檔（AI 看圖抄的），不是這個網頁讀的：AI 也會抄錯或漏字，請每張對照照片。"
+                    "每張的前兩行「查驗時間：」「照片日期：」要留著。看過後逐張打勾，或用「全選」。")
+        elif how.startswith("自動讀字"):
             st.info("照片上的字已自動讀成草稿。印刷字大多讀得到，手寫字常讀錯或讀不到：請對照照片改正，"
                     "看不清的留〔?〕（Excel 會標成待確認）。沒標〔?〕的字也可能讀錯，請每張都對照照片。"
                     "每張的前兩行「查驗時間：」「照片日期：」要留著。看過後逐張打勾，或用「全選」。")
@@ -352,7 +373,7 @@ def page():
         if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆（白板上沒有這一欄，要填請用下面的「修改欄位」）")
         if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
         if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以〔?1〕〔?2〕這樣的編號標出）")
-        if READER and READER.name.startswith("自動讀字"):
+        if S.get("how", "").startswith(("自動讀字", "匯入的讀圖檔")):
             todo_notes.append("內容是自動讀字的草稿加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
         n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})
         if n_long: todo_notes.append(f"內容較長：{n_long} 筆已加高列高完整顯示（沒有截行、沒有縮字），列印前請看一下版面")

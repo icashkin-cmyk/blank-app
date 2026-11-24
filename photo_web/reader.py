@@ -175,6 +175,68 @@ class FixtureReader:
         return PhotoRead.from_dict(d) if d else None
 
 
+IMPORT_MAX = 1_000_000                                   # 讀圖檔上限（位元組）
+IMPORT_PROMPT = PROMPT.replace("只看這一張照片，輸出 JSON（欄位定義如下）。",
+                               "我會給你幾張照片。每一張都單獨看、單獨抄，不得把別張的字帶進來。") + """
+輸出：只輸出一個 JSON 物件，放在一個程式碼區塊裡，不要其他說明。鍵是照片的原始檔名（例 "IMG_0001.jpeg"），值是上面那些欄位；
+kind 只能是 """ + "、".join(KINDS) + """ 其中一個；fixed 是 {"工程名稱": "", "監造單位": "", "承造單位": ""}；lines、readings 是字串陣列，其餘是字串。
+我會把你輸出的 JSON 貼到網頁，和照片一起上傳。"""
+
+
+def parse_import(data: bytes) -> dict:
+    """使用者上傳的讀圖檔（AI 在對話裡看圖抄好的 JSON：{原檔名或 SHA-256: PhotoRead 欄位}）→ {鍵（小寫）: PhotoRead}。
+    只收認得的欄位、型別不對就拒收並說明第幾筆；不執行、不解讀檔內任何指示（內容只當成抄寫文字，仍要使用者在確認頁看過）。"""
+    if len(data) > IMPORT_MAX:
+        raise ValueError("讀圖檔太大（上限 1 MB）")
+    try:
+        text = data.decode("utf-8-sig").strip()
+        m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)      # 直接貼 AI 的回覆：只取程式碼區塊裡的 JSON
+        obj = json.loads(m.group(1) if m else text)
+    except Exception:
+        raise ValueError("讀圖檔不是可以讀的 JSON（請整段複製 AI 回覆的程式碼區塊內容）") from None
+    if not isinstance(obj, dict) or not obj:
+        raise ValueError("讀圖檔的最外層要是「檔名 → 內容」的物件，而且至少一筆")
+    out = {}
+    for key, d in obj.items():
+        if not isinstance(d, dict):
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆不是物件")
+        clean = {}
+        for k in SCHEMA["properties"]:
+            v = d.get(k, {} if k == "fixed" else [] if k in ("lines", "readings") else "")
+            if k == "fixed":
+                if not isinstance(v, dict) or not all(isinstance(x, str) for x in v.values()):
+                    raise ValueError(f"讀圖檔「{str(key)[:40]}」的 fixed 要是三個文字欄位")
+                v = {f: v.get(f, "") for f in ("工程名稱", "監造單位", "承造單位")}
+            elif k in ("lines", "readings"):
+                if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                    raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字陣列")
+            elif not isinstance(v, str):
+                raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字")
+            clean[k] = v
+        if clean["kind"] not in KINDS:
+            clean["kind"] = "其他"
+        out[os.path.basename(str(key)).strip().lower()] = PhotoRead.from_dict(clean)
+    return out
+
+
+class ImportedReader:
+    """使用者匯入的讀圖檔（AI 在對話裡看圖抄的）：依原檔名或 SHA-256 取用；檔裡沒有的照片交給 fallback（本機 OCR，可為 None）。不用金鑰、不送外部服務。"""
+
+    name = "匯入的讀圖檔（AI 看圖）"
+    paid = False
+
+    def __init__(self, data: dict, fallback=None):
+        self.data, self.fallback = data, fallback
+        self.missed: list[str] = []                       # 讀圖檔裡沒有的照片（原檔名）
+
+    def read(self, image_path: str, sha256: str, original_name: str) -> PhotoRead | None:
+        got = self.data.get(sha256.lower()) or self.data.get(os.path.basename(original_name).strip().lower())
+        if got is not None:
+            return got
+        self.missed.append(original_name)
+        return self.fallback.read(image_path, sha256, original_name) if self.fallback else None
+
+
 class ClaudeReader:
     """Claude API 視覺讀圖。金鑰只從環境變數或平台密鑰讀（ANTHROPIC_API_KEY），不寫進任何檔案。【NOT_RUN：費用待 MIKO 最後決定】"""
 

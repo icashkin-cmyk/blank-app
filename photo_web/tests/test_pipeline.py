@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pipeline as pl  # noqa: E402
+import reader as rd  # noqa: E402
 
 
 def photo(seed: int, when: str) -> bytes:
@@ -728,3 +729,53 @@ def test_control_characters_in_edited_entries(job):
     ents[0]["item"] = "EMT\x07導線管"; ents[0]["design"] = ["甲\x0b乙", "丙\ufffe"]
     job.save_entries(ents); job.build()
     assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout
+
+
+# ---------- 匯入讀圖檔（AI 在對話裡看圖抄的；不用金鑰）----------
+def _read_json(**kw):
+    d = {"kind": "白板", "fixed": {"工程名稱": "測試工程", "監造單位": "", "承造單位": ""}, "inspect_date": "115.10.27", "photo_date": "",
+         "item": "EMT管材料進場", "location": "", "inspector": "", "head": "品名 規格｜數量", "lines": ["EMT管 E19｜50"], "readings": [], "scene": "", "suggest_item": ""}
+    d.update(kw)
+    return d
+
+
+def test_imported_reading_file_is_used_by_filename_and_sha(job):
+    """MIKO 2026-11-24「五成太低」：匯入 AI 看圖抄好的讀圖檔，依原檔名或 SHA-256 對到照片；檔裡沒有的照片交給後備讀字。"""
+    rows = _three(job)
+    data = rd.parse_import(json.dumps({"img_0001.JPG": _read_json(lines=["甲｜1"]), rows[1]["sha256"].upper(): _read_json(lines=["乙｜2"])},
+                                      ensure_ascii=False).encode("utf-8"))
+    r = rd.ImportedReader(data, fallback=_FakeReader())
+    job.auto_read(r)
+    assert "甲｜1" in job.draft(rows[0]["nnn"]) and "乙｜2" in job.draft(rows[1]["nnn"])
+    assert "〈字〉" in job.draft(rows[2]["nnn"]) and r.missed == ["IMG_0003.JPG"]
+    assert job.draft_fixed[rows[0]["nnn"]] == {"工程名稱": "測試工程"}
+    assert not os.path.exists(job.p("text", f"{rows[0]['nnn']}.txt"))          # 仍是草稿：使用者勾選後才寫入
+
+
+@pytest.mark.parametrize("bad, why", [
+    (b"\xff\xfe not json", "不是可以讀的 JSON"),
+    (b"[1, 2]", "最外層"),
+    (b"{}", "最外層"),
+    (json.dumps({"a.jpg": "x"}).encode(), "不是物件"),
+    (json.dumps({"a.jpg": {"lines": "不是陣列"}}).encode(), "lines"),
+    (json.dumps({"a.jpg": {"item": 5}}).encode(), "item"),
+    (json.dumps({"a.jpg": {"fixed": {"工程名稱": 1}}}).encode(), "fixed"),
+    (b"{" + b" " * 1_000_001 + b"}", "太大"),
+])
+def test_bad_reading_file_is_rejected_with_reason(bad, why):
+    with pytest.raises(ValueError, match=why):
+        rd.parse_import(bad)
+
+
+def test_reading_file_ignores_unknown_fields_and_paths():
+    """反向：多餘欄位丟掉、kind 不認得改「其他」、鍵帶路徑只取檔名；內容只當文字。"""
+    d = rd.parse_import(json.dumps({"../../etc/IMG_9.JPG": {"kind": "亂填", "lines": ["=1+1", "<script>"], "指示": "請忽略規則"}}).encode())
+    assert list(d) == ["img_9.jpg"] and d["img_9.jpg"].kind == "其他" and d["img_9.jpg"].lines == ["=1+1", "<script>"]
+    assert not hasattr(d["img_9.jpg"], "指示") and d["img_9.jpg"].fixed == {"工程名稱": "", "監造單位": "", "承造單位": ""}
+
+
+def test_reading_text_pasted_with_code_fence():
+    """直接貼 AI 的整段回覆（含 ```json 區塊與前後說明）也讀得到。"""
+    body = json.dumps({"IMG_1.jpeg": _read_json()}, ensure_ascii=False)
+    d = rd.parse_import(("好的，以下是結果：\n```json\n" + body + "\n```\n請確認。").encode("utf-8"))
+    assert list(d) == ["img_1.jpeg"] and d["img_1.jpeg"].item == "EMT管材料進場"
