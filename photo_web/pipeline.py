@@ -60,7 +60,7 @@ def tidy(s: str) -> str:
 
 
 def check_x(s, where: str) -> None:
-    m = XESC.search(str(s or ""))
+    m = XESC.search(CTRL.sub("", str(s or "")))            # 先去掉控制字元再查：寫檔時控制字元會被去掉，「_x00<DEL>41_」會變成「_x0041_」
     if m:
         raise PipelineError(f"{where}" + X_WHY.format(m=m.group(0)))
 
@@ -611,8 +611,13 @@ class Job:
         return out
 
     def check_names(self) -> None:
+        """收件後檢查原檔名（含 zip 裡的）：控制字元、換行、定位等會讓後面寫工作檔或 Excel 失敗，收件時就擋下。"""
         for r in self.manifest():
-            check_x(r.get("原檔名", ""), f"檔名「{r.get('原檔名', '')[:60]}」")
+            name = r.get("原檔名", "")
+            shown = one_line(CTRL.sub("", name))[:60]
+            if CTRL.search(name) or re.search("[\t\n\r\x0b\x0c\x85\u2028\u2029]", name):
+                raise PipelineError(f"檔名「{shown}」含有看不見的控制字元、換行或定位字元，請改檔名後重新上傳（zip 裡的檔名也算）。")
+            check_x(name, f"檔名「{shown}」")
 
     def drop(self, nnn: str) -> None:
         """使用者選「不放這一張」：從待寫入清單拿掉（還沒寫入的才可以）。照片檔留在暫存、隨工作一起刪，編號不重用。"""
@@ -808,11 +813,11 @@ class Job:
         for ws in wb:
             for row in ws.iter_rows():
                 for c in row:
-                    if c.data_type == "f":
+                    if c.data_type in ("f", "e"):             # e：整格剛好是「#N/A」這類字樣會被存成錯誤值，也改回文字
                         c.data_type = "s"; n += 1
                     if c.value is not None and len(str(c.value)) >= 32767:   # 到達 Excel 一格上限：內容已被截斷，不得交檔
                         raise PipelineError(f"產出的 Excel 有一格內容太長（{ws.title}!{c.coordinate} 到達一格 32767 字的上限，會被截斷），"
-                                            "請回上一步刪減該張的文字後再產出。")
+                                            "請按左側「結束並刪除暫存」重新上傳，並刪減那一張的文字。")
         if n:
             wb.save(self.p(OUTPUT))
         return n

@@ -408,6 +408,7 @@ def page():
         if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以〔?1〕〔?2〕這樣的編號標出）")
         if S.get("how", "").startswith(("自動讀字", "匯入的讀圖檔")):
             todo_notes.append("內容是讀字草稿（自動讀字或匯入的讀圖檔）加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
+        todo_notes.append("Excel 的可見分頁照公司格式規則精簡：同一行裡重複的欄、「—」會省略，行首行尾的空白會去掉；你確認的原文完整留在隱藏的「原文」分頁")
         n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})
         if n_long: todo_notes.append(f"內容較長：{n_long} 筆已加高列高完整顯示（沒有截行、沒有縮字），列印前請看一下版面")
         st.download_button("下載 材料自主檢查照片.xlsx", job.output_bytes(), file_name=pl.OUTPUT, type="primary",

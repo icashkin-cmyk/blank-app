@@ -908,3 +908,32 @@ def test_r4_confirmed_values_kept_on_job_and_notes_reset():
     assert src.index("S.notes = {}") < src.index("S.notes = S.job.auto_read(")
     psrc = Path(pl.__file__).read_text(encoding="utf-8")
     assert "self.confirmed_sug" in psrc and "self.chosen_forms" in psrc
+
+
+def test_r5_xescape_checked_after_ctrl_strip_and_names(tmp_path):
+    """稽核 v3 第 5 輪必修 1、3：「_x00<控制字元>41_」去掉控制字元後就是「_x0041_」，要照樣擋；
+    檔名含控制字元、換行或 Excel 不收的字時在收件就擋下。"""
+    for ch in ("\x7f", "\x01", "￾", "\x00"):
+        with pytest.raises(pl.PipelineError, match="_x0041_"):
+            pl.check_x(f"甲_x00{ch}41_尾", "工程名稱")
+        with pytest.raises(ValueError, match="_x0041_"):
+            rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": f"甲_x00{ch}41_尾"}}}).encode())
+    class J(pl.Job):
+        def __init__(self, names):
+            self.names = names
+        def manifest(self):
+            return [{"nnn": f"{i:03d}", "原檔名": n} for i, n in enumerate(self.names, 1)]
+    J(["IMG 1 (2).jpeg", "中文 檔名.JPG"]).check_names()
+    for bad in ("ctl\x01x.jpg", "a\nb.jpg", "a\tb.jpg", "a b.jpg", "a￾b.jpg", "_x00\x0141_.jpg", "a\x7f.jpg"):
+        with pytest.raises(pl.PipelineError, match="檔名"):
+            J(["ok.jpg", bad]).check_names()
+    from openpyxl import Workbook
+    class K(pl.Job):
+        def __init__(self, d):
+            self.dir = str(d)
+    k = K(tmp_path); wb = Workbook(); wb.active["A1"] = "#N/A"; wb.active["A2"] = "#DIV/0!"; wb.save(k.p(pl.OUTPUT))
+    k.strings_only()
+    ws = load_workbook(k.p(pl.OUTPUT)).active
+    assert [(c.value, c.data_type) for c in (ws["A1"], ws["A2"])] == [("#N/A", "s"), ("#DIV/0!", "s")]
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "重複的欄" in src                                   # 下載頁說明可見分頁照 Skill 規則精簡（必修 2 的裁定：加說明）
