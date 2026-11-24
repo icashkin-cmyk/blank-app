@@ -44,8 +44,70 @@ FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
 Q_MARK = "〔?〕"
 MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
 SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
-CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
+CELL_MAX = 30000                     # 寫檔前的最後一道：Excel 一格上限 32767 字
+
+
+# Excel 檔案格式會把「_x0041_」解碼成別的字（A、換行、控制字元）；「x005F_」openpyxl 讀檔時整段刪掉（Skill 腳本重讀工作檔時發生）。
+XESC = re.compile(r"_x[0-9A-Fa-f]{4}_|x005F_")
+X_WHY = "含有「{m}」這種字樣（底線、x、四位十六進位、底線；或 x005F 加底線），寫進 Excel 會變成別的字或消失，請改掉其中一個底線或刪掉後再試"
+
+
+NOTE = re.compile(r"（[^（）\n]*）")      # Skill 會拿掉或加上的全形括號註記（例：「（≠查驗時間）」）；拿掉後才拼出來的字樣也要查
+NAME_MAX = 200                           # 檔名上限（UTF-8 位元組；檔案系統上限 255，留給編號與副檔名）
+STUCK = "這一批的文字已經寫入，沒辦法在這一頁修改：請按左側「結束並刪除暫存」，重新上傳照片，並避開上面說的問題。"
+
+
+def tidy(s: str) -> str:
+    """寫檔前的整理：去掉看不見的控制字元（含 U+0085、U+2028、U+2029 這三種特殊換行）。看得見的字不動。"""
+    return CTRL.sub("", s)
+
+
+def flat(s) -> str:
+    """單行欄位寫入前：換行、定位變一個空白，去掉頭尾空白；中間的空白（含連續空白、全形空白）原樣。"""
+    return re.sub(r"\r\n|[\r\n\t]", " ", str(s or "")).strip()
+
+
+def check_x(s, where: str) -> None:
+    """寫入前擋下 Excel 會改寫的字樣（擋下並說明，不靜默改）。先去掉控制字元再查：寫檔時控制字元會被去掉。"""
+    t = CTRL.sub("", str(s or ""))
+    m = XESC.search(t) or XESC.search(NOTE.sub("", t))
+    if m:
+        raise PipelineError(f"{where}" + X_WHY.format(m=m.group(0)))
+    q = re.search(r"〔\?\d{4,}〕", t)
+    if q:
+        raise PipelineError(f"{where}的待確認編號「{q.group(0)[:12]}{'…' if len(q.group(0)) > 12 else ''}」超過 3 位數（最多到 999）："
+                            "沒編號的〔?〕會在產出時從最大的編號往下自動排，請把這個編號改成〔?〕。")
+
+
+def check_q_total(texts, labels=None) -> None:
+    """寫入前逐張先算（Skill 每張各自編號）：該張最大的〔?N〕加上沒編號的〔?〕個數超過 999，產出時自動編號就會超過 3 位數
+    （稽核 v3 第 8 輪：原本寫入後才擋；第 9 輪：改成逐張算，不合計）。texts 依確認頁的順序。"""
+    for i, t in zip(labels or range(1, len(texts) + 1), texts):
+        t = CTRL.sub("", str(t or ""))
+        top = max((int(n) for n in re.findall(r"〔\?(\d+)〕", t)), default=0)
+        blank = t.count("〔?〕")
+        if top + blank > 999:
+            raise PipelineError(f"第 {i} 張待確認的〔?〕太多：最大編號 {top} 加上沒編號的 {blank} 個會超過 999（產出時自動編號最多 3 位數）。"
+                                "請把大的編號改成〔?〕，或減少這一張〔?〕的數量。")
+
+
+def check_name_len(name: str) -> None:
+    if len(os.path.basename(str(name)).encode("utf-8")) > NAME_MAX:
+        raise PipelineError(f"檔名太長（「{os.path.basename(str(name))[:20]}…」），請把檔名改短（中文約 60 字以內）後重新上傳。")
+
+
+def u16(s) -> int:
+    """UTF-16 長度（瀏覽器與 Streamlit 的 max_chars 用這個算；U+10000 以上的字算 2）。"""
+    return len(str(s or "").encode("utf-16-le", "surrogatepass")) // 2
+
+
+def one_line(s) -> str:
+    """單行欄位：換行、定位、U+2028 等空白一律變一個空白。"""
+    return " ".join(str(s or "").split())
+
+
 
 
 def skill_source() -> str:
@@ -95,8 +157,11 @@ def _zip_images(data: bytes) -> list[zipfile.ZipInfo]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             # 條件要和既有腳本 log_photo.prep 完全相同（只排除「._」開頭）；不同的話，上限會被繞過（第二輪稽核 F4）
-            return [i for i in z.infolist() if os.path.basename(i.filename) and i.filename.lower().endswith(IMG_EXT)
-                    and not os.path.basename(i.filename).startswith("._")]
+            got = [i for i in z.infolist() if os.path.basename(i.filename) and i.filename.lower().endswith(IMG_EXT)
+                   and not os.path.basename(i.filename).startswith("._")]
+            for i in got:
+                check_name_len(i.filename)
+            return got
     except zipfile.BadZipFile as e:
         raise PipelineError("zip 檔打不開，請重新壓縮後再上傳") from e
 
@@ -326,6 +391,8 @@ class Job:
         self.scripts = os.path.join(self.dir, "scripts")
         self.log: list[StepResult] = []
         self.reads: dict[str, rd.PhotoRead] = {}   # sha256 → 讀圖結果（建議欄位用）
+        self.confirmed_sug: dict[str, str] = {}      # nnn → 使用者在確認頁確認過的建議檢查項目（按產出當下記下，重試不會掉）
+        self.chosen_forms: dict[str, tuple] = {}     # nnn →（材料表品項編號, 實測值是否同材料表）
         try:
             if scripts_src:  # 已下載好的快取資料夾
                 shutil.copytree(scripts_src, self.scripts)
@@ -494,10 +561,16 @@ class Job:
         row = next((r for r in self.manifest() if r["nnn"] == nnn), None)
         if row is None:
             raise PipelineError(f"manifest 沒有第 {nnn} 張")
+        body = tidy(body)
+        check_x(body, f"第 {int(nnn)} 張的照片文字")
+        for k, v in (fixed or {}).items():
+            check_x(v, f"{k}")
+        if len(body) > CELL_MAX:
+            raise PipelineError(f"第 {int(nnn)} 張的內容有 {len(body)} 字，超過 {CELL_MAX} 字（Excel 一格放不下），請刪減後再產出。")
         path = self.p("text", f"{nnn}.txt")
-        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{CTRL.sub('', body).strip()}\n")
+        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{body.strip()}\n")
         given = fixed is not None
-        fixed = {k: CTRL.sub("", v).strip() for k, v in (fixed or {}).items() if v and CTRL.sub("", v).strip()}
+        fixed = {k: flat(CTRL.sub("", v)) for k, v in (fixed or {}).items() if v and flat(CTRL.sub("", v))}   # 值不得帶換行（否則會變成另一個欄位）
         fpath = self.p("fixed", f"{nnn}.txt")
         if fixed:
             os.makedirs(self.p("fixed"), exist_ok=True)
@@ -578,6 +651,16 @@ class Job:
                     out.setdefault(nnn, []).append((f, v[f].strip()))
         return out
 
+    def check_names(self) -> None:
+        """收件後檢查原檔名（含 zip 裡的）：控制字元、換行、定位等會讓後面寫工作檔或 Excel 失敗，收件時就擋下。"""
+        for r in self.manifest():
+            name = r.get("原檔名", "")
+            check_name_len(name)
+            shown = one_line(CTRL.sub("", name))[:60]
+            if CTRL.search(name) or re.search("[\t\n\r\x0b\x0c\x85\u2028\u2029]", name):
+                raise PipelineError(f"檔名「{shown}」含有看不見的控制字元、換行或定位字元，請改檔名後重新上傳（zip 裡的檔名也算）。")
+            check_x(name, f"檔名「{shown}」")
+
     def drop(self, nnn: str) -> None:
         """使用者選「不放這一張」：從待寫入清單拿掉（還沒寫入的才可以）。照片檔留在暫存、隨工作一起刪，編號不重用。"""
         rows = self.manifest()
@@ -627,15 +710,26 @@ class Job:
             notes[r["原檔名"]] = rd.warnings(got)
         return notes
 
-    def apply_suggestions(self, entries: list[dict]) -> list[dict]:
+    def suggestions(self) -> dict[str, str]:
+        """{nnn: 讀圖建議的檢查項目}：給確認頁顯示成可改的欄位（稽核 v3 第 3 輪：這一欄原本不經確認就寫入）。"""
+        return {r["nnn"]: self.reads[r["sha256"]].suggest_item for r in self.manifest()
+                if r.get("sha256") in self.reads and self.reads[r["sha256"]].suggest_item}
+
+    def apply_suggestions(self, entries: list[dict], confirmed: dict[str, str] | None = None) -> list[dict]:
         """照片沒有「查驗項目」欄時，用讀圖的建議品名當檢查項目；只改 entries（給使用者在第 4 步確認），不改工作檔原文。
         意象描述保留在設計/標準值（2026-11-22 稽核：意象在 Excel 看不到）。量測讀數行由 make_entries v0.5 放進實測值；
         舊版 make_entries（v0.4 以前）留在設計/標準值的量測讀數行，這裡搬到實測值，白板實測一併保留。"""
-        where = {r["列號"]: r["sha256"] for r in self.manifest() if r.get("列號")}
+        # confirmed＝{nnn: 使用者在確認頁看過（可能改過或清空）的建議}；有給就只用它，不直接用讀圖結果
+        rows = {r["列號"]: r for r in self.manifest() if r.get("列號")}
         for e in entries:
-            got = self.reads.get(where.get(f"{e['_sheet']}:{e['_row']}", ""))
-            if (not e["item"] or e["item"].startswith(("—", "UNKNOWN"))) and got and got.suggest_item:
-                e["item"] = got.suggest_item
+            row = rows.get(f"{e['_sheet']}:{e['_row']}", {})
+            if confirmed is None:
+                got = self.reads.get(row.get("sha256", ""))
+                sug = got.suggest_item if got else ""
+            else:
+                sug = flat(CTRL.sub("", confirmed.get(row.get("nnn", ""), "")))[:200]
+            if (not e["item"] or e["item"].startswith(("—", "UNKNOWN"))) and sug:
+                e["item"] = sug
             elif e["item"].startswith(("—", "UNKNOWN")):
                 e["item"] = ""
             meas = [ln[len("（量測讀數："):].removesuffix("）") for ln in e["design"] if ln.startswith("（量測讀數：")]
@@ -739,7 +833,12 @@ class Job:
         return json.load(open(self.p(out), encoding="utf-8"))
 
     def save_entries(self, entries: list[dict]) -> None:
-        clean = lambda x: CTRL.sub("", x) if isinstance(x, str) else [CTRL.sub("", y) if isinstance(y, str) else y for y in x] if isinstance(x, list) else x
+        clean = lambda x: tidy(x) if isinstance(x, str) else [tidy(y) if isinstance(y, str) else y for y in x] if isinstance(x, list) else x
+        for i, e in enumerate(entries):
+            for v in e.values():
+                for x in (v if isinstance(v, list) else [v]):
+                    if isinstance(x, str):
+                        check_x(x, f"第 {i + 1} 筆")
         entries[:] = [{k: clean(v) for k, v in e.items()} for e in entries]     # 貼上的控制字元 Excel 不收
         json.dump(entries, open(self.p("entries.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
@@ -756,11 +855,24 @@ class Job:
         for ws in wb:
             for row in ws.iter_rows():
                 for c in row:
-                    if c.data_type == "f":
+                    if c.data_type in ("f", "e"):             # e：整格剛好是「#N/A」這類字樣會被存成錯誤值，也改回文字
                         c.data_type = "s"; n += 1
+                    if c.value is not None and len(str(c.value)) >= 32767:   # 到達 Excel 一格上限：內容已被截斷，不得交檔
+                        raise PipelineError(f"產出的 Excel 有一格內容太長（{ws.title}!{c.coordinate} 到達一格 32767 字的上限，會被截斷），"
+                                            "請按左側「結束並刪除暫存」重新上傳，並刪減那一張的文字。")
         if n:
             wb.save(self.p(OUTPUT))
         return n
+
+    def check_output(self) -> None:
+        """產出後直接看 xlsx 裡的 XML：還有「_xHHHH_」字樣（例如 Skill 處理後才拼出來的）就不交檔。
+        這時文字已寫入，確認頁改不了，訊息要明講怎麼做（稽核 v3 第 6 輪必修 1、2）。"""
+        with zipfile.ZipFile(self.p(OUTPUT)) as z:
+            for n in z.namelist():
+                if n == "xl/sharedStrings.xml" or n.startswith("xl/worksheets/"):
+                    m = XESC.search(z.read(n).decode("utf-8", "replace"))
+                    if m:
+                        raise PipelineError("產出的 Excel 裡" + X_WHY.format(m=m.group(0)).replace("後再試", "") + "。" + STUCK)
 
     def preflight_deliver(self) -> StepResult:
         return self.must(self.run("交檔檢查", "preflight.py", "deliver", OUTPUT, "entries.json"), "交檔檢查有 FAIL，不得交檔")

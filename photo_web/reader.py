@@ -175,6 +175,131 @@ class FixtureReader:
         return PhotoRead.from_dict(d) if d else None
 
 
+IMPORT_PHOTO_MAX = 4000                  # 每張照片匯入內容的字數上限（同 pipeline.MAX_TEXT；Excel 一格上限 32767 字）
+IMPORT_ITEMS_MAX = 200                   # 讀圖檔筆數上限（一批照片最多 20 張；留給重複貼上的餘裕）
+IMPORT_MAX = 1_000_000                                   # 讀圖檔上限（位元組）
+IMPORT_PROMPT = PROMPT.replace("只看這一張照片，輸出 JSON（欄位定義如下）。",
+                               "我會給你幾張照片。每一張都單獨看、單獨抄，不得把別張的字帶進來。") + """
+輸出：只輸出一個 JSON 物件，放在一個程式碼區塊裡，不要其他說明。鍵是照片的原始檔名（例 "IMG_0001.jpeg"），值是上面那些欄位；
+kind 只能是 """ + "、".join(KINDS) + """ 其中一個；fixed 是 {"工程名稱": "", "監造單位": "", "承造單位": ""}；lines、readings 是字串陣列，其餘是字串。
+我會把你輸出的 JSON 貼到網頁，和照片一起上傳。"""
+
+
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029\ufffe\uffff]")   # 同 pipeline.CTRL：Excel 不收的控制字元
+FIELD_MAX = 200                                          # 單行欄位（工程資料、項目、位置、人員、日期、建議項目…）每欄上限
+
+
+_QBIG = re.compile(r"〔\?\d{4,}〕")                # 待確認編號太大：拒收並說明（不靜默改）
+_NOTE = re.compile(r"（[^（）\n]*）")                      # 同 pipeline.NOTE
+_XESC = re.compile(r"_x[0-9A-Fa-f]{4}_|x005F_")                 # 同 pipeline.XESC
+
+
+def _one_line(s: str) -> str:
+    # 換行、定位變一個空白，去掉控制字元與頭尾空白；中間的空白（連續、全形、NBSP）原樣（同 pipeline.flat；稽核 v3 第 8 輪）
+    return _CTRL.sub("", re.sub(r"\r\n|[\r\n\t\x0b\x0c\x85\u2028\u2029]", " ", s)).strip()                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
+
+
+def _find_json(text: str):
+    """從貼上的整段文字取出 JSON 物件：先整段讀；不行就看 ``` 程式碼區塊（最多試 20 個）；再不行取第一個 { 到最後一個 }。
+    只用字串切割，不用會回溯的正規表示式（稽核 v3 第 2 輪：1 MB 的特製內容曾讓伺服器卡 66 秒）。"""
+    cands = [text]
+    parts = text.split("```", 41)
+    for blk in parts[1:41:2]:
+        blk = blk.strip()
+        if blk[:4].lower() == "json":
+            blk = blk[4:].strip()
+        if blk.startswith("{"):
+            cands.append(blk)
+    a, b = text.find("{"), text.rfind("}")
+    if 0 <= a < b:
+        cands.append(text[a:b + 1])
+    for c in cands:
+        try:
+            obj = json.loads(c)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj
+        if c is text:
+            return obj                                     # 整段是合法 JSON 但不是物件：交給下面說明
+    raise ValueError
+
+
+def parse_import(data: bytes) -> dict:
+    """使用者上傳的讀圖檔（AI 在對話裡看圖抄好的 JSON：{原檔名或 SHA-256: PhotoRead 欄位}）→ {鍵（小寫）: PhotoRead}。
+    只收認得的欄位、型別不對就拒收並說明第幾筆；不執行、不解讀檔內任何指示（內容只當成抄寫文字，仍要使用者在確認頁看過）。"""
+    if len(data) > IMPORT_MAX:
+        raise ValueError("讀圖檔太大（上限 1 MB）")
+    try:
+        obj = _find_json(data.decode("utf-8-sig").strip())
+    except Exception:
+        raise ValueError("讀圖檔不是可以讀的 JSON（請整段複製 AI 回覆的程式碼區塊內容）") from None
+    if not isinstance(obj, dict) or not obj:
+        raise ValueError("讀圖檔的最外層要是「檔名 → 內容」的物件，而且至少一筆")
+    if len(obj) > IMPORT_ITEMS_MAX:
+        raise ValueError(f"讀圖檔有 {len(obj)} 筆，太多了（一次最多 {IMPORT_ITEMS_MAX} 筆；一批照片最多 20 張），請只貼這一批照片的結果")
+    try:
+        json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        raise ValueError("讀圖檔裡有無法顯示的字元（不成對的代理字元），請 AI 重新輸出一次") from None
+    out = {}
+    for key, d in obj.items():
+        if not isinstance(d, dict):
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆不是物件")
+        clean = {}
+        for k in SCHEMA["properties"]:
+            v = d.get(k, {} if k == "fixed" else [] if k in ("lines", "readings") else "")
+            if k == "fixed":
+                if not isinstance(v, dict) or not all(isinstance(x, str) for x in v.values()):
+                    raise ValueError(f"讀圖檔「{str(key)[:40]}」的 fixed 要是三個文字欄位")
+                v = {f: _one_line(v.get(f, "")) for f in ("工程名稱", "監造單位", "承造單位")}
+            elif k in ("lines", "readings"):
+                if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                    raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字陣列")
+                v = [_one_line(x) for x in v]
+            elif not isinstance(v, str):
+                raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字")
+            else:
+                v = _one_line(v)
+            clean[k] = v
+        if clean["kind"] not in KINDS:
+            clean["kind"] = "其他"
+        read = PhotoRead.from_dict(clean)
+        # 上限算「組成草稿後」的長度（每筆讀數、每個欄位組成草稿時會多出標籤字），不是原始字數
+        if _QBIG.search(json.dumps(clean, ensure_ascii=False)):
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」的待確認編號超過 999（〔?N〕的 N 最多 3 位數），請改成〔?〕後再貼")
+        flatj = json.dumps(clean, ensure_ascii=False)
+        m = _XESC.search(flatj) or _XESC.search(_NOTE.sub("", flatj))
+        if m:
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」含有「{m.group(0)}」這種字樣（底線、x、四位十六進位、底線；或 x005F 加底線），"
+                             "寫進 Excel 會變成別的字或消失，請改掉後再貼")
+        single = list(clean["fixed"].values()) + [v for k, v in clean.items() if isinstance(v, str) and k != "scene"]
+        if any(len(x) > FIELD_MAX for x in single) or len(compose_text(read)) > IMPORT_PHOTO_MAX:
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料、項目、位置、人員、日期、建議項目每欄上限 {FIELD_MAX} 字，"
+                             f"組成草稿後上限 {IMPORT_PHOTO_MAX} 字）")
+        out[re.split(r"[\\/]", str(key))[-1].strip().lower()] = read
+    return out
+
+
+class ImportedReader:
+    """使用者匯入的讀圖檔（AI 在對話裡看圖抄的）：依原檔名或 SHA-256 取用；檔裡沒有的照片交給 fallback（本機 OCR，可為 None）。不用金鑰、不送外部服務。"""
+
+    name = "匯入的讀圖檔（AI 看圖）"
+    paid = False
+
+    def __init__(self, data: dict, fallback=None):
+        self.data, self.fallback = data, fallback
+        self.missed: list[str] = []                       # 讀圖檔裡沒有的照片（原檔名）
+
+    def read(self, image_path: str, sha256: str, original_name: str) -> PhotoRead | None:
+        got = self.data.get(sha256.lower()) or self.data.get(os.path.basename(original_name).strip().lower())
+        if got is not None:
+            return got
+        if original_name not in self.missed:
+            self.missed.append(original_name)
+        return self.fallback.read(image_path, sha256, original_name) if self.fallback else None
+
+
 class ClaudeReader:
     """Claude API 視覺讀圖。金鑰只從環境變數或平台密鑰讀（ANTHROPIC_API_KEY），不寫進任何檔案。【NOT_RUN：費用待 MIKO 最後決定】"""
 

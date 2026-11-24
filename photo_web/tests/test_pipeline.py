@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
@@ -13,6 +14,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pipeline as pl  # noqa: E402
+import reader as rd  # noqa: E402
 
 
 def photo(seed: int, when: str) -> bytes:
@@ -728,3 +730,292 @@ def test_control_characters_in_edited_entries(job):
     ents[0]["item"] = "EMT\x07導線管"; ents[0]["design"] = ["甲\x0b乙", "丙\ufffe"]
     job.save_entries(ents); job.build()
     assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout
+
+
+# ---------- 匯入讀圖檔（AI 在對話裡看圖抄的；不用金鑰）----------
+def _read_json(**kw):
+    d = {"kind": "白板", "fixed": {"工程名稱": "測試工程", "監造單位": "", "承造單位": ""}, "inspect_date": "115.10.27", "photo_date": "",
+         "item": "EMT管材料進場", "location": "", "inspector": "", "head": "品名 規格｜數量", "lines": ["EMT管 E19｜50"], "readings": [], "scene": "", "suggest_item": ""}
+    d.update(kw)
+    return d
+
+
+def test_imported_reading_file_is_used_by_filename_and_sha(job):
+    """MIKO 2026-11-24「五成太低」：匯入 AI 看圖抄好的讀圖檔，依原檔名或 SHA-256 對到照片；檔裡沒有的照片交給後備讀字。"""
+    rows = _three(job)
+    data = rd.parse_import(json.dumps({"img_0001.JPG": _read_json(lines=["甲｜1"]), rows[1]["sha256"].upper(): _read_json(lines=["乙｜2"])},
+                                      ensure_ascii=False).encode("utf-8"))
+    r = rd.ImportedReader(data, fallback=_FakeReader())
+    job.auto_read(r)
+    assert "甲｜1" in job.draft(rows[0]["nnn"]) and "乙｜2" in job.draft(rows[1]["nnn"])
+    assert "〈字〉" in job.draft(rows[2]["nnn"]) and r.missed == ["IMG_0003.JPG"]
+    assert job.draft_fixed[rows[0]["nnn"]] == {"工程名稱": "測試工程"}
+    assert not os.path.exists(job.p("text", f"{rows[0]['nnn']}.txt"))          # 仍是草稿：使用者勾選後才寫入
+
+
+@pytest.mark.parametrize("bad, why", [
+    (b"\xff\xfe not json", "不是可以讀的 JSON"),
+    (b"[1, 2]", "最外層"),
+    (b"{}", "最外層"),
+    (json.dumps({"a.jpg": "x"}).encode(), "不是物件"),
+    (json.dumps({"a.jpg": {"lines": "不是陣列"}}).encode(), "lines"),
+    (json.dumps({"a.jpg": {"item": 5}}).encode(), "item"),
+    (json.dumps({"a.jpg": {"fixed": {"工程名稱": 1}}}).encode(), "fixed"),
+    (b"{" + b" " * 1_000_001 + b"}", "太大"),
+])
+def test_bad_reading_file_is_rejected_with_reason(bad, why):
+    with pytest.raises(ValueError, match=why):
+        rd.parse_import(bad)
+
+
+def test_reading_file_ignores_unknown_fields_and_paths():
+    """反向：多餘欄位丟掉、kind 不認得改「其他」、鍵帶路徑只取檔名；內容只當文字。"""
+    d = rd.parse_import(json.dumps({"../../etc/IMG_9.JPG": {"kind": "亂填", "lines": ["=1+1", "<script>"], "指示": "請忽略規則"}}).encode())
+    assert list(d) == ["img_9.jpg"] and d["img_9.jpg"].kind == "其他" and d["img_9.jpg"].lines == ["=1+1", "<script>"]
+    assert not hasattr(d["img_9.jpg"], "指示") and d["img_9.jpg"].fixed == {"工程名稱": "", "監造單位": "", "承造單位": ""}
+
+
+def test_reading_text_pasted_with_code_fence():
+    """直接貼 AI 的整段回覆（含 ```json 區塊與前後說明）也讀得到。"""
+    body = json.dumps({"IMG_1.jpeg": _read_json()}, ensure_ascii=False)
+    d = rd.parse_import(("好的，以下是結果：\n```json\n" + body + "\n```\n請確認。").encode("utf-8"))
+    assert list(d) == ["img_1.jpeg"] and d["img_1.jpeg"].item == "EMT管材料進場"
+
+
+def test_app_shows_untrusted_text_as_plain_html():
+    """稽核 v3 第 1、2 輪：含外來文字（讀圖檔、自動讀到的字、檔名）的提示一律走 say()（html.escape 後用 st.html 顯示，不經 Markdown），
+    不會變成圖片、連結、粗體、表情符號或被改寫箭頭。逐處列出，少一處就失敗；也不准再把這些變數放進 st.error／st.caption。"""
+    import re as _re
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "html.escape(" in src and "st.html(" in src
+    for needle in ('say("error", str(e))', 'say("error", S.pop("upload_err"))', 'say("error", S.pop("review_err"))',
+                   'say("caption", r["原檔名"])', 'say("caption", "⚠ " + w)', 'say("caption", "各張讀到的寫法不同：', 'say("error", "這一張讀到的',
+                   'say("caption", f"讀字方式：'):
+        assert needle in src, needle
+    for ln in src.splitlines():
+        if _re.search(r"st\.(error|caption|warning|info|markdown|write|success)\(", ln):
+            assert not _re.search(r"str\(e\)|upload_err|review_err|原檔名|add_note|\bw\b\)|odd\[nnn\]|opts\[f\]", ln), ln
+
+
+def test_parse_import_no_quadratic_regex():
+    """稽核 v3 第 2 輪 M1：1 MB 的「```{」重複不能讓伺服器卡住（原本的正規表示式是平方級回溯，卡 66 秒）。"""
+    import time
+    t = time.time()
+    with pytest.raises(ValueError):
+        rd.parse_import(("```{" * 250_000).encode())
+    with pytest.raises(ValueError):
+        rd.parse_import(("```json\n{" * 100_000 + "}```" * 100_000).encode())
+    assert time.time() - t < 5
+
+
+def test_parse_import_fence_variants():
+    body = json.dumps({"a.jpg": {"lines": ["甲｜1"]}}, ensure_ascii=False)
+    for text in ("說明\n```json\n" + body + "\n```\n結尾", "```JSON\n" + body + "\n```", "```python\nx=1\n```\n```json\n" + body + "\n```\n```\n其他\n```",
+                 "以下是結果：\n" + body + "\n請確認", body):
+        assert list(rd.parse_import(text.encode())) == ["a.jpg"], text[:30]
+
+
+def test_parse_import_composed_length_and_surrogate_and_newline():
+    """稽核 v3 第 2 輪 M2～M4：上限要算到組成草稿後的長度；孤立代理字元在匯入時就拒收；單行欄位裡的換行改成空白（寫入與畫面一致）。"""
+    with pytest.raises(ValueError, match="太長"):
+        rd.parse_import(json.dumps({"p1.jpg": {"lines": ["甲｜1"], "readings": ["a"] * 3990, "item": "X"}}).encode())
+    big = rd.parse_import(json.dumps({"p1.jpg": {"lines": ["字" * 40] * 60, "readings": ["1"] * 100}}).encode())["p1.jpg"]
+    assert len(rd.compose_text(big)) < 2 * pl.MAX_TEXT
+    for bad in ('{"p1.jpg":{"lines":["甲\\ud800乙｜1"]}}', '{"p\\ud800.jpg":{"lines":["甲"]}}', '{"p1.jpg":{"fixed":{"工程名稱":"甲\\udfff"}}}'):
+        with pytest.raises(ValueError, match="字元"):
+            rd.parse_import(bad.encode())
+    d = rd.parse_import(json.dumps({"p1.jpg": {"fixed": {"工程名稱": "甲新建工程\n監造單位：乙事務所\r\n承造單位：丙"}, "item": "A\nB", "lines": ["x\ny"]}}).encode())["p1.jpg"]
+    assert d.fixed["工程名稱"] == "甲新建工程 監造單位：乙事務所 承造單位：丙" and d.item == "A B" and d.lines == ["x y"]
+
+
+def test_write_text_fixed_newline_cannot_inject(job_with_photo=None):
+    """M4 根因：fixed 的值帶換行時不能變成另一個欄位。"""
+    assert pl.flat("  甲\n監造單位：乙\r\n丙\t丁  戊　己 ") == "甲 監造單位：乙 丙 丁  戊　己"   # 只把換行、定位變空白、去頭尾；中間的空白原樣（第 6 輪必修 4）
+    src = Path(pl.__file__).read_text(encoding="utf-8")
+    assert "flat(CTRL.sub" in src
+
+
+def test_parse_import_limits_length_and_windows_path():
+    """稽核 v3 第 1 輪 S1、S6：每張內容總長有上限（不會寫出超過 Excel 一格上限的字）；鍵是 Windows 路徑也只取檔名。"""
+    with pytest.raises(ValueError, match="太長"):
+        rd.parse_import(json.dumps({"a.jpg": {"lines": ["字" * (pl.MAX_TEXT + 1)]}}).encode())
+    with pytest.raises(ValueError, match="太長"):
+        rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": "字" * 201}}}).encode())
+    d = rd.parse_import(json.dumps({"C:\\x\\y\\IMG_1.JPG": {"lines": ["甲｜1"]}}).encode())
+    assert list(d) == ["img_1.jpg"]
+
+
+def test_imported_reader_missed_no_duplicates():
+    r = rd.ImportedReader({}, fallback=None)
+    r.read("x", "0" * 64, "b.jpg"); r.read("x", "0" * 64, "b.jpg")
+    assert r.missed == ["b.jpg"]
+
+
+def test_parse_import_single_line_fields_capped_and_ctrl_stripped():
+    """稽核 v3 第 3 輪必修 1：suggest_item 等不在草稿裡的欄位也要有上限（每個單行欄位 200 字）；控制字元在匯入時就去掉。"""
+    for f in ("suggest_item", "item", "location", "inspector", "head", "inspect_date", "photo_date"):
+        with pytest.raises(ValueError, match="太長"):
+            rd.parse_import(json.dumps({"a.jpg": {f: "字" * 201}}).encode())
+    d = rd.parse_import(json.dumps({"a.jpg": {"suggest_item": "甲\x00\x1b乙\x7f", "lines": ["x\x00y"], "fixed": {"工程名稱": "丙\x1b丁"}}}).encode())["a.jpg"]
+    assert d.suggest_item == "甲乙" and d.lines == ["xy"] and d.fixed["工程名稱"] == "丙丁"
+
+
+def test_apply_suggestions_uses_only_what_user_confirmed():
+    """稽核 v3 第 3 輪必修 1：建議的檢查項目要顯示在確認頁（可改、可清空），產出時只用使用者確認過的值，不直接用讀圖檔的值。"""
+    class J(pl.Job):
+        def __init__(self):                               # 不建工作資料夾：只測這一個函式
+            self.reads = {"s1": rd.PhotoRead(kind="其他", fixed={}, suggest_item="讀圖檔的建議"), "s2": rd.PhotoRead(kind="其他", fixed={}, suggest_item="第二張")}
+        def manifest(self):
+            return [{"nnn": "001", "sha256": "s1", "列號": "A:4"}, {"nnn": "002", "sha256": "s2", "列號": "A:18"}]
+    def ents():
+        return [{"_sheet": "A", "_row": 4, "item": "", "design": [], "measured": []}, {"_sheet": "A", "_row": 18, "item": "—", "design": [], "measured": []}]
+    j = J()
+    assert j.suggestions() == {"001": "讀圖檔的建議", "002": "第二張"}
+    got = j.apply_suggestions(ents(), {"001": "使用者改過", "002": ""})
+    assert [e["item"] for e in got] == ["使用者改過", ""]
+    assert [e["item"] for e in j.apply_suggestions(ents(), {})] == ["", ""]
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(job.make_entries(), job.confirmed_sug)" in src
+
+
+def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
+    """稽核 v3 第 4 輪必修 1、2：〔?N〕的 N 超過 3 位數改回〔?〕（否則 Skill 往下編號會把一格撐到幾萬字）；
+    「_x0041_」這種 Excel 會解碼成別的字的字樣一律擋下並說明；產出後任何一格到達 Excel 上限就不交檔。"""
+    assert pl.tidy("甲〔?12〕丙〔?〕\x00\u2028\x85") == "甲〔?12〕丙〔?〕"
+    for big in ("甲〔?" + "9" * 3700 + "〕", "〔?1234〕", "〔?１２３４〕"):                # 第 6 輪：不靜默改，擋下並說明
+        with pytest.raises(pl.PipelineError, match="編號"):
+            pl.check_x(big, "第 1 張")
+    pl.check_x("〔?999〕〔?〕", "第 1 張")
+    for bad in ("A_x0041_B", "_x000A_", "_xd83d_"):
+        with pytest.raises(pl.PipelineError, match="_x"):
+            pl.check_x(bad, "第 1 張")
+        with pytest.raises(ValueError, match="_x"):
+            rd.parse_import(json.dumps({"a.jpg": {"lines": [bad]}}).encode())
+        with pytest.raises(ValueError, match="_x"):
+            rd.parse_import(json.dumps({"a.jpg": {"suggest_item": bad}}).encode())
+    pl.check_x("PVC_x1_ 2.0mm _x00G1_", "第 1 張")                       # 不是四位十六進位：不擋
+    with pytest.raises(ValueError, match="編號"):
+        rd.parse_import(json.dumps({"a.jpg": {"lines": ["〔?" + "9" * 50 + "〕"]}}).encode())
+    from openpyxl import Workbook
+    class J(pl.Job):
+        def __init__(self, d):
+            self.dir = str(d)
+    j = J(tmp_path); wb = Workbook(); wb.active["A1"] = "字" * 40000; wb.save(j.p(pl.OUTPUT))
+    with pytest.raises(pl.PipelineError, match="太長"):
+        j.strings_only()
+
+
+def test_r4_confirmed_values_kept_on_job_and_notes_reset():
+    """稽核 v3 第 4 輪必修 3、4：確認過的建議項目與材料表品項在按產出當下記在工作上（部分寫入失敗後重試不會掉）；每批開始一律重設提醒。"""
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")' in src and "job.apply_suggestions(job.make_entries(), job.confirmed_sug)" in src
+    assert "job.chosen_forms[nnn] = " in src and "job.chosen_forms)" in src
+    assert src.index("S.notes = {}") < src.index("S.notes = S.job.auto_read(")
+    psrc = Path(pl.__file__).read_text(encoding="utf-8")
+    assert "self.confirmed_sug" in psrc and "self.chosen_forms" in psrc
+
+
+def test_r5_xescape_checked_after_ctrl_strip_and_names(tmp_path):
+    """稽核 v3 第 5 輪必修 1、3：「_x00<控制字元>41_」去掉控制字元後就是「_x0041_」，要照樣擋；
+    檔名含控制字元、換行或 Excel 不收的字時在收件就擋下。"""
+    for ch in ("\x7f", "\x01", "￾", "\x00"):
+        with pytest.raises(pl.PipelineError, match="_x0041_"):
+            pl.check_x(f"甲_x00{ch}41_尾", "工程名稱")
+        with pytest.raises(ValueError, match="_x0041_"):
+            rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": f"甲_x00{ch}41_尾"}}}).encode())
+    class J(pl.Job):
+        def __init__(self, names):
+            self.names = names
+        def manifest(self):
+            return [{"nnn": f"{i:03d}", "原檔名": n} for i, n in enumerate(self.names, 1)]
+    J(["IMG 1 (2).jpeg", "中文 檔名.JPG"]).check_names()
+    for bad in ("ctl\x01x.jpg", "a\nb.jpg", "a\tb.jpg", "a b.jpg", "a￾b.jpg", "_x00\x0141_.jpg", "a\x7f.jpg"):
+        with pytest.raises(pl.PipelineError, match="檔名"):
+            J(["ok.jpg", bad]).check_names()
+    from openpyxl import Workbook
+    class K(pl.Job):
+        def __init__(self, d):
+            self.dir = str(d)
+    k = K(tmp_path); wb = Workbook(); wb.active["A1"] = "#N/A"; wb.active["A2"] = "#DIV/0!"; wb.save(k.p(pl.OUTPUT))
+    k.strings_only()
+    ws = load_workbook(k.p(pl.OUTPUT)).active
+    assert [(c.value, c.data_type) for c in (ws["A1"], ws["A2"])] == [("#N/A", "s"), ("#DIV/0!", "s")]
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "重複的欄" in src                                   # 下載頁說明可見分頁照 Skill 規則精簡（必修 2 的裁定：加說明）
+
+
+def test_r6_output_scan_and_long_names_and_no_truncation(tmp_path):
+    """稽核 v3 第 6 輪：產出後直接看 xlsx 內的 XML，還有「_xHHHH_」（例如 Skill 處理後才拼出來的）就不交檔，並明講要怎麼做；
+    括號註記被拿掉後才形成的也在寫入前先擋；檔名太長在收件時用看得懂的話擋下；下載頁文字框不得把內容切到 4000 字；訊息不露例外名稱。"""
+    from openpyxl import Workbook
+    class J(pl.Job):
+        def __init__(self, d):
+            self.dir = str(d)
+    j = J(tmp_path); wb = Workbook(); wb.active["A1"] = "備註_x0041_尾"; wb.save(j.p(pl.OUTPUT))
+    with pytest.raises(pl.PipelineError, match="結束並刪除暫存"):
+        j.check_output()
+    wb = Workbook(); wb.active["A1"] = "備註_X0041_尾 _x1_ 正常"; wb.save(j.p(pl.OUTPUT))
+    j.check_output()
+    with pytest.raises(pl.PipelineError, match="_x0041_"):
+        pl.check_x("照片日期：2026-10-27 備註_x00（≠查驗時間）41_尾", "第 1 張")
+    class N(pl.Job):
+        def __init__(self, names):
+            self.names = names
+        def manifest(self):
+            return [{"nnn": "001", "原檔名": n} for n in self.names]
+    with pytest.raises(pl.PipelineError, match="檔名太長"):
+        N(["長" * 100 + ".jpg"]).check_names()
+    with pytest.raises(pl.PipelineError, match="檔名太長"):
+        pl.check_name_len("長" * 90 + ".xlsx")
+    pl.check_name_len("IMG_0001 (2).jpeg")
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "__class__.__name__" not in src
+    assert "max_chars=pl.MAX_TEXT" not in src and src.count("max_chars=max(pl.MAX_TEXT, pl.u16(") >= 3
+    assert "pl.check_name_len(" in src and "job.check_output" in src and "pl.STUCK" in src
+
+
+def test_r7_x005f_and_done_page_ctrl():
+    """稽核 v3 第 7 輪：「x005F_」（前面沒有底線）openpyxl 讀檔時會整段刪掉，要一樣擋下；下載頁「修改欄位」先去控制字元再切行。"""
+    for bad in ("型號x005F_B", "x005F_", "a\x7fx005F_b"):
+        with pytest.raises(pl.PipelineError, match="x005F_"):
+            pl.check_x(bad, "第 1 張")
+        with pytest.raises(ValueError, match="x005F_"):
+            rd.parse_import(json.dumps({"a.jpg": {"item": bad}}).encode())
+    pl.check_x("x005f_ X005F_ 0x005F", "第 1 張")             # 大小寫不同、沒有結尾底線：openpyxl 不動，不擋
+    class N(pl.Job):
+        def __init__(self): pass
+        def manifest(self):
+            return [{"nnn": "001", "原檔名": "ax005F_b.jpg"}]
+    with pytest.raises(pl.PipelineError, match="檔名"):
+        N().check_names()
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'pl.tidy(S[f"e{i}design"]).splitlines()' in src and 'pl.tidy(S[f"e{i}measured"]).splitlines()' in src
+
+
+def test_r8_question_total_precheck_and_import_keeps_spaces():
+    """稽核 v3 第 8 輪：〔?〕自動編號會超過 999 的情況在寫入前就擋下，訊息講實際原因；匯入時中間的空白（連續、全形、NBSP）原樣。"""
+    pl.check_q_total(["甲〔?〕乙〔?12〕", "〔?〕" * 900])
+    for texts in (["〔?〕" * 1000], ["甲〔?999〕乙〔?〕"], ["〔?٣٣٣٣٣〕〔?〕"], ["甲", "〔?998〕〔?〕〔?〕"]):
+        with pytest.raises(pl.PipelineError, match="999"):
+            pl.check_q_total(texts)
+    pl.check_q_total(["〔?〕" * 500, "〔?〕" * 500, "〔?999〕", "〔?〕"])       # 第 9 輪建議 1：Skill 每張各自編號，逐張算，不合計
+    with pytest.raises(pl.PipelineError, match="第 2 張"):
+        pl.check_q_total(["甲", "〔?〕" * 1000])
+    with pytest.raises(pl.PipelineError, match="超過 3 位數"):          # 第 9 輪必修 2：〔?0001〕不是「超過 999」
+        pl.check_x("〔?0001〕", "第 1 張")
+    assert "white-space:pre-wrap" in (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")   # 第 9 輪必修 1：檔名的連續空白照樣顯示
+    d = rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": " 甲　乙  工程 "}, "inspector": "林　明", "item": "品 名",
+                                              "lines": ["A  B　C\tD"], "suggest_item": "建  議　項"}}, ensure_ascii=False).encode())["a.jpg"]
+    assert (d.fixed["工程名稱"], d.inspector, d.item, d.lines, d.suggest_item) == ("甲　乙  工程", "林　明", "品 名", ["A  B　C D"], "建  議　項")
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "pl.check_q_total(" in src
+    with pytest.raises(ValueError, match="太多"):
+        rd.parse_import(json.dumps({f"{i}.jpg": {} for i in range(201)}).encode())
+
+
+def test_r10_max_chars_counts_utf16():
+    """稽核 v3 第 10 輪：Streamlit 前端用 UTF-16 長度比 max_chars；罕用字（𠮷、表情符號）算 2 個，上限要照 UTF-16 長度放寬，否則修改會被丟掉。"""
+    assert pl.u16("甲𠮷😀") == 5 and pl.u16("") == 0
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "max_chars=max(pl.MAX_TEXT, len(" not in src and src.count("max_chars=max(pl.MAX_TEXT, pl.u16(") == 3
+    assert src.count("max_chars=max(200, pl.u16(") == 5 and "max_chars=200" not in src and "max_chars=max(200, len(" not in src

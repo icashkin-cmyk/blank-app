@@ -6,6 +6,14 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
 
 ## 流程（三步；對應 SKILL.md「二、流程」）
 1. 上傳照片（20 張以內或 zip；可附上次的 xlsx 接續）→ `preflight start`、`restore`、`prep`（SHA-256 去重）→ 自動讀字成草稿。
+   - 想要更準（選用，不用金鑰）：第 1 步的折疊區有一段可複製的話（`reader.IMPORT_PROMPT`），把同一批照片和這段話丟給 Claude 等 AI 對話，
+     把回覆的 JSON 貼回來（或上傳 .json）。`reader.parse_import` 檢查格式（只收認得的欄位、型別不對拒收、整份上限 1 MB、最多 200 筆、每張組成草稿後上限 4000 字，工程資料、項目、位置、人員、日期、建議項目每欄上限 200 字，單行欄位與每一行裡的換行、定位改成空白並去掉頭尾空白（中間的空白原樣）、控制字元去掉、含不成對代理字元拒收、鍵只取檔名〔/ 與 \ 都切〕；
+     取 JSON 只用字串切割：整段、``` 程式碼區塊、第一個 { 到最後一個 } 依序試，不用會回溯的正規表示式），
+     `ImportedReader` 依原檔名或 SHA-256 對到照片當草稿；沒對到的照片用本機 OCR，並在該張標明。內容只當成抄寫文字，仍要在確認頁看過。
+     讀圖建議的檢查項目（`suggest_item`，不在草稿文字裡）在確認頁該張下方顯示成可改、可清空的欄位，按產出當下把這一格的值與選的材料表品項記在工作上（`Job.confirmed_sug`、`Job.chosen_forms`），產出只用記下的值；部分照片寫入失敗後重試也不會掉。
+     照片是使用者自己交給 AI 對話的（折疊區有提醒先確認可以外傳），網頁本身不送外部服務。
+     含外來文字（讀圖檔、自動讀到的字、檔名）的提示訊息一律用 `app.say`（`html.escape` 後以 `st.html` 顯示，不經 Markdown，連續空白照樣顯示），只顯示成字，不會變成圖片、連結、粗體或表情符號。
+     測試工具（Playwright）用含中文的磁碟路徑選檔會失敗；網頁本身收得下中文檔名（獨立稽核以記憶體內容上傳驗證）。
 2. 確認內容（一頁）：
    - 工程資料（工程名稱、監造單位、承造單位）整批確認一次：預設取各張讀到的多數寫法，沒讀清楚（含〔?〕）的寫法不當預設；
      各張寫法不同時列出來讓使用者確認上面那一個。確認值只寫進「這張照片上讀得到該欄」的照片；人工抄寫時每張都用。
@@ -21,7 +29,14 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
    - 按「產出 Excel」：`addmany` → `base --all` → `make_entries` → `build_company` → 公式改回文字 → `preflight deliver`
      （照片或使用者的字以「=」開頭時，`build_company.py` 會寫成 Excel 公式；網頁在產出後把所有公式格改回文字、字不動。公司範本的產出檔本來沒有公式。）
      （印 FAIL 也回 0 的既有缺陷由本模組攔下）。有照片寫不進去時說明原因、留在這一頁。
-   - 每張文字框上限 4000 字（`pipeline.MAX_TEXT`）。
+   - 每張文字框上限 4000 字（`pipeline.MAX_TEXT`）；草稿本身超過時，上限放寬到草稿長度（照瀏覽器的算法用 UTF-16 長度，罕用字與表情符號算 2）。寫檔前另有一道 30000 字的檢查（`pipeline.CELL_MAX`），超過就不產出並說明是第幾張；產出後再檢查每一格，任何一格到達 Excel 一格 32767 字的上限（內容會被截斷）就不交檔並說明是哪一格。
+   - 〔?N〕的 N 超過 3 位數（含全形數字）時擋下並請使用者改成〔?〕；同一張最大編號加上沒編號的〔?〕個數超過 999 時也在寫入前擋下（`pipeline.check_x`、`check_q_total`；Skill 會從最大編號往下編，N 很長會把一格撐到幾萬字）。不靜默改。
+   - 「_x0041_」這種字樣（底線、x、四位十六進位、底線）Excel 檔案格式會解碼成別的字；「x005F_」openpyxl 讀檔時會整段刪掉。寫進去會和畫面不同：讀圖檔、照片文字、工程資料、建議項目、修改欄位與檔名裡出現時，寫入前擋下並說明（`pipeline.check_x`；先去掉控制字元與全形括號註記再查）。
+     產出後另直接看 xlsx 裡的 XML（`Job.check_output`），還有這種字樣（例如 Skill 處理後才拼出來的）就不交檔。
+   - 文字寫入之後才失敗（產生 entries、產出、交檔檢查、上面這一道）時，確認頁已經改不了：訊息會明講要按左側「結束並刪除暫存」重新上傳（`pipeline.STUCK`）。
+   - 看不見的控制字元（含 U+0085、U+2028、U+2029 三種特殊換行）寫檔時去掉；工程資料與建議項目只把換行、定位變成空白並去掉頭尾空白，中間的空白原樣。
+   - 檔名（含 zip 裡的）有控制字元、換行或定位字元、或超過 200 位元組（中文約 60 字）時，收件就擋下並請使用者改檔名（`Job.check_names`）。
+   - 可見分頁的排版照 Skill 的 `build_company.py`：同一行裡重複的欄、「—」會省略，行首行尾空白會去掉；原文完整留在隱藏的「原文」分頁。這是 Skill 的規則，網頁不改，下載頁有說明。
    - 材料表品項（選用）：每張照片可從 Skill 內建材料表（`forms.csv`）選一個品項，比較像這張讀到的字的排前面。選了以後檢查項目用材料表的
      材料/設備名稱、設計/標準值用「工作表名稱＋品質管理標準」（與 `make_entries` 對到材料表時的寫法相同）；勾「實測值與材料表相符」時實測值同寫，
      原本只在實測欄的內容（白板實測、量測讀數）接在後面不覆蓋。
@@ -88,7 +103,7 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
    ```
    金鑰與上列密鑰只填在平台的 Secrets，不寫進 repo。
-4. 關掉工具列與錯誤細節：Streamlit Community Cloud 沒有設定畫面，要在 repo 根目錄加 `.streamlit/config.toml`，內容是 `[client]` 區段的 `toolbarMode = "viewer"` 與 `showErrorDetails = "none"`（`false` 仍會顯示堆疊）。這個檔會同時影響同一個 repo 的其他 Streamlit 頁面，所以本 repo 目前沒有加，由部署的人決定。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
+4. 關掉工具列與錯誤細節：Streamlit Community Cloud 沒有設定畫面，要在 repo 根目錄加 `.streamlit/config.toml`，內容是 `[client]` 區段的 `toolbarMode = "viewer"` 與 `showErrorDetails = "none"`（`false` 仍會顯示堆疊）。本 repo 根目錄的 `.streamlit/config.toml` 目前只有 `[browser]` 的 `gatherUsageStats = false`（關掉 Streamlit 使用統計，瀏覽器才不會連到 Streamlit 的統計主機）；`[client]` 這兩項會同時影響同一個 repo 的其他 Streamlit 頁面，所以沒有加，由部署的人決定。Streamlit 只讀「啟動時所在目錄」的 `.streamlit/`：要從 repo 根目錄啟動，從別的目錄啟動時使用統計不會關。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
 
 ## 執行與測試
 ```

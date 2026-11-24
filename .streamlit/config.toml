@@ -1,0 +1,3 @@
+# 不送 Streamlit 的使用統計（瀏覽器端不對外連線）
+[browser]
+gatherUsageStats = false
