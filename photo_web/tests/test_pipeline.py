@@ -1091,3 +1091,21 @@ def test_r11_produce_is_one_uninterruptible_step(job):
     i1 = src.index("job.outcome = job.produce(inputs, fx)")
     i0 = src.rindex("job.go = False", 0, i1)
     assert "S." not in src[i0:i1] and "S[" not in src[i0:i1] and "st." not in src[i0:i1]   # 中間不可有會被中斷的地方
+
+
+def test_r12_drop_is_refused_while_producing(job):
+    """稽核 v3 第 12 輪必修 1：產出進行中（或已按下產出還沒開始做）按「不放這一張」不可和產出同時改工作清單：
+    這一下不生效並當場告知；上一批的提示不可留到下一批。"""
+    rows = _three(job)
+    n = rows[1]["nnn"]
+    assert job.drop_if_idle(n, pending=True) is False                     # 已按下產出
+    with job.working():
+        assert job.drop_if_idle(n) is False                               # 產出正在跑
+    assert [r["nnn"] for r in job.stopped()] == [r["nnn"] for r in rows]  # 都沒被拿掉
+    assert job.drop_if_idle(n) is True
+    assert [r["nnn"] for r in job.stopped()] == [rows[0]["nnn"], rows[2]["nnn"]]
+    assert not job.lock.locked()
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "job.drop_if_idle(nnn" in src and "job.drop(nnn)" not in src
+    for k in ("review_err", "fixed_note", "produce_msg", "re_msg", "late_note"):
+        assert f'"{k}"' in src.split("def reset():")[1].split("\n\n\n")[0]   # 換批時清掉

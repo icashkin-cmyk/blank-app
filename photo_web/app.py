@@ -54,6 +54,8 @@ READER = _reader()
 USAGE = pl.Usage()                                    # 側欄的 reset() 會用到，要先定義（第四輪稽核：NameError）
 if S.job and not S.job.alive():                       # 工作資料夾已不在（閒置太久被清除）
     S.job, S.stage = None, "upload"
+    for _k in ("review_err", "fixed_note", "produce_msg", "re_msg", "late_note"):
+        S.pop(_k, None)
     st.warning("上一次的工作閒置太久，暫存已清除，請重新上傳。")
 if S.job and S.stage == "upload":                     # 上一輪收件或讀圖被中斷（處理中改了檔案等）：清掉並退回沒用到的預扣
     S.job.abandon(USAGE); S.job = None
@@ -110,6 +112,8 @@ def reset():
     if S.job:
         S.job.abandon(USAGE)                              # 還沒結清的預扣退回（付費讀圖已送出的張數照算）；已結清的不退
     S.job, S.stage = None, "upload"
+    for k in ("review_err", "fixed_note", "produce_msg", "re_msg", "late_note"):   # 上一批的提示不留到下一批（稽核 v3 第 12 輪）
+        S.pop(k, None)
 
 
 def fail_upload(msg: str):
@@ -266,6 +270,8 @@ def page():
             if o[0] == "done":
                 S.entries = o[1]
                 S.stage = "done"
+                for k in ("review_err", "fixed_note", "produce_msg"):   # 確認頁的提示：已到下載頁就不再適用
+                    S.pop(k, None)
             else:
                 S.review_err = o[1]
             job.outcome = None
@@ -289,6 +295,8 @@ def page():
         say("caption", f"讀字方式：{how}" + (f"｜收件：{S.add_note.removeprefix('OK ')}" if S.get("add_note") else ""))
         if S.get("review_err"):
             say("error", S.pop("review_err"))
+        if S.get("late_note"):
+            say("warning", S.pop("late_note"))
         if todo:
             # 固定欄位：整批共用，預設取各張讀到的多數寫法；使用者在這裡確認一次（各張寫法不同時不再逐張擋下）
             st.subheader("工程資料（整批共用，確認一次）")
@@ -325,8 +333,11 @@ def page():
             def _one():                                       # 取消任何一張：「全選」跟著取消
                 S.all_ok = all(S.get(f"ok{r['nnn']}") for r in job.stopped())
             def _drop(nnn):                                   # 從這一批拿掉一張；其餘已打的勾留著
-                try:
-                    job.drop(nnn)
+                try:                                          # 已按下產出或產出正在跑：這一下不生效，當場告知（不和產出同時改工作清單）
+                    if S.stage != "review" or not job.drop_if_idle(nnn, getattr(job, "go", False)):
+                        S.late_note = (f"產出已經開始，第 {int(nnn)} 張沒有拿掉，產出的 Excel 裡仍有這一張。"
+                                       "要拿掉請按「結束並刪除暫存」，重新上傳時不要放這一張。")
+                        return
                 except pl.PipelineError as e:
                     S.review_err = str(e); return
                 for k in (f"ok{nnn}", f"t{nnn}", f"form{nnn}", f"fsame{nnn}", f"sug{nnn}"):
@@ -428,6 +439,8 @@ def page():
     # ---------- 3 下載 ----------
     if S.stage == "done":
         st.header("3 下載")
+        if S.get("late_note"):
+            say("warning", S.pop("late_note"))
         st.success("Excel 已產出，交檔檢查全部 PASS。")
         ents = S.get("entries") or []
         todo_notes = []

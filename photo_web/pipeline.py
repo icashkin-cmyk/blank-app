@@ -740,6 +740,17 @@ class Job:
                 raise PipelineError(f"檔名「{shown}」含有看不見的控制字元、換行或定位字元，請改檔名後重新上傳（zip 裡的檔名也算）。")
             check_x(name, f"檔名「{shown}」")
 
+    def drop_if_idle(self, nnn: str, pending: bool = False) -> bool:
+        """「不放這一張」：已按下產出（pending）或產出正在跑時不動工作清單，回 False（呼叫端當場告知）；否則握著鎖拿掉。
+        （按鈕的回呼會和產出同時執行；稽核 v3 第 12 輪必修 1。）"""
+        if pending or not self.lock.acquire(blocking=False):
+            return False
+        try:
+            self.drop(nnn)
+            return True
+        finally:
+            self.lock.release()
+
     def drop(self, nnn: str) -> None:
         """使用者選「不放這一張」：從待寫入清單拿掉（還沒寫入的才可以）。照片檔留在暫存、隨工作一起刪，編號不重用。"""
         rows = self.manifest()
