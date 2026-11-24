@@ -637,15 +637,26 @@ class Job:
             notes[r["原檔名"]] = rd.warnings(got)
         return notes
 
-    def apply_suggestions(self, entries: list[dict]) -> list[dict]:
+    def suggestions(self) -> dict[str, str]:
+        """{nnn: 讀圖建議的檢查項目}：給確認頁顯示成可改的欄位（稽核 v3 第 3 輪：這一欄原本不經確認就寫入）。"""
+        return {r["nnn"]: self.reads[r["sha256"]].suggest_item for r in self.manifest()
+                if r.get("sha256") in self.reads and self.reads[r["sha256"]].suggest_item}
+
+    def apply_suggestions(self, entries: list[dict], confirmed: dict[str, str] | None = None) -> list[dict]:
         """照片沒有「查驗項目」欄時，用讀圖的建議品名當檢查項目；只改 entries（給使用者在第 4 步確認），不改工作檔原文。
         意象描述保留在設計/標準值（2026-11-22 稽核：意象在 Excel 看不到）。量測讀數行由 make_entries v0.5 放進實測值；
         舊版 make_entries（v0.4 以前）留在設計/標準值的量測讀數行，這裡搬到實測值，白板實測一併保留。"""
-        where = {r["列號"]: r["sha256"] for r in self.manifest() if r.get("列號")}
+        # confirmed＝{nnn: 使用者在確認頁看過（可能改過或清空）的建議}；有給就只用它，不直接用讀圖結果
+        rows = {r["列號"]: r for r in self.manifest() if r.get("列號")}
         for e in entries:
-            got = self.reads.get(where.get(f"{e['_sheet']}:{e['_row']}", ""))
-            if (not e["item"] or e["item"].startswith(("—", "UNKNOWN"))) and got and got.suggest_item:
-                e["item"] = got.suggest_item
+            row = rows.get(f"{e['_sheet']}:{e['_row']}", {})
+            if confirmed is None:
+                got = self.reads.get(row.get("sha256", ""))
+                sug = got.suggest_item if got else ""
+            else:
+                sug = one_line(CTRL.sub("", confirmed.get(row.get("nnn", ""), "")))[:200]
+            if (not e["item"] or e["item"].startswith(("—", "UNKNOWN"))) and sug:
+                e["item"] = sug
             elif e["item"].startswith(("—", "UNKNOWN")):
                 e["item"] = ""
             meas = [ln[len("（量測讀數："):].removesuffix("）") for ln in e["design"] if ln.startswith("（量測讀數：")]

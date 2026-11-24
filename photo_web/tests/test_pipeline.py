@@ -849,3 +849,30 @@ def test_imported_reader_missed_no_duplicates():
     r = rd.ImportedReader({}, fallback=None)
     r.read("x", "0" * 64, "b.jpg"); r.read("x", "0" * 64, "b.jpg")
     assert r.missed == ["b.jpg"]
+
+
+def test_parse_import_single_line_fields_capped_and_ctrl_stripped():
+    """稽核 v3 第 3 輪必修 1：suggest_item 等不在草稿裡的欄位也要有上限（每個單行欄位 200 字）；控制字元在匯入時就去掉。"""
+    for f in ("suggest_item", "item", "location", "inspector", "head", "inspect_date", "photo_date"):
+        with pytest.raises(ValueError, match="太長"):
+            rd.parse_import(json.dumps({"a.jpg": {f: "字" * 201}}).encode())
+    d = rd.parse_import(json.dumps({"a.jpg": {"suggest_item": "甲\x00\x1b乙\x7f", "lines": ["x\x00y"], "fixed": {"工程名稱": "丙\x1b丁"}}}).encode())["a.jpg"]
+    assert d.suggest_item == "甲乙" and d.lines == ["xy"] and d.fixed["工程名稱"] == "丙丁"
+
+
+def test_apply_suggestions_uses_only_what_user_confirmed():
+    """稽核 v3 第 3 輪必修 1：建議的檢查項目要顯示在確認頁（可改、可清空），產出時只用使用者確認過的值，不直接用讀圖檔的值。"""
+    class J(pl.Job):
+        def __init__(self):                               # 不建工作資料夾：只測這一個函式
+            self.reads = {"s1": rd.PhotoRead(kind="其他", fixed={}, suggest_item="讀圖檔的建議"), "s2": rd.PhotoRead(kind="其他", fixed={}, suggest_item="第二張")}
+        def manifest(self):
+            return [{"nnn": "001", "sha256": "s1", "列號": "A:4"}, {"nnn": "002", "sha256": "s2", "列號": "A:18"}]
+    def ents():
+        return [{"_sheet": "A", "_row": 4, "item": "", "design": [], "measured": []}, {"_sheet": "A", "_row": 18, "item": "—", "design": [], "measured": []}]
+    j = J()
+    assert j.suggestions() == {"001": "讀圖檔的建議", "002": "第二張"}
+    got = j.apply_suggestions(ents(), {"001": "使用者改過", "002": ""})
+    assert [e["item"] for e in got] == ["使用者改過", ""]
+    assert [e["item"] for e in j.apply_suggestions(ents(), {})] == ["", ""]
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(guard(job.make_entries), {" in src

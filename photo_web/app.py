@@ -64,7 +64,7 @@ pl.recover(USAGE)                                     # 別的工作階段中斷
 pl.sweep()
 
 
-_SAY = {"error": "background:rgba(255,43,43,.09);color:#bd4043;padding:.75rem 1rem;border-radius:.5rem;margin:0 0 1rem",
+_SAY = {"error": "background:rgba(255,43,43,.14);border-left:4px solid #ff4b4b;padding:.75rem 1rem;border-radius:.5rem;margin:0 0 1rem",
         "caption": "font-size:.875rem;opacity:.6;margin:0 0 .5rem"}
 
 
@@ -305,7 +305,7 @@ def page():
                     job.drop(nnn)
                 except pl.PipelineError as e:
                     S.review_err = str(e); return
-                for k in (f"ok{nnn}", f"t{nnn}", f"form{nnn}", f"fsame{nnn}"):
+                for k in (f"ok{nnn}", f"t{nnn}", f"form{nnn}", f"fsame{nnn}", f"sug{nnn}"):
                     S.pop(k, None)
                 new = job.fixed_defaults()                    # 工程資料依剩下的照片重取：被拿掉那張的值不得留著（稽核第 2 輪必修 1）
                 changed = [f for f in pl.FIXED_FIELDS if S.get(f"fx{f}", "") != new[f]]
@@ -317,6 +317,7 @@ def page():
                                     "你先前在這幾欄改過的字也一併重設，請再確認一次。")
                 _one()
             st.checkbox("全選：下面每一張我都看過了", key="all_ok", on_change=_all)
+            sugs = job.suggestions()
             for r in todo:
                 nnn = r["nnn"]
                 st.markdown(f"**第 {int(nnn)} 張**")
@@ -333,6 +334,9 @@ def page():
                         st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}v{S.get('fxver', 0)}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
                                  max_chars=max(pl.MAX_TEXT, len(job.draft(nnn))))
+                    if nnn in sugs:                           # 讀圖建議的檢查項目：看得到、可改、可清空，產出時只用這一格的值
+                        st.text_input("檢查項目（讀圖建議；照片文字沒有「查驗項目」時才會用，可改、可清空）", value=sugs[nnn],
+                                      key=f"sug{nnn}", max_chars=200)
                     if job.forms():                           # 材料表品項：用選的，不靠讀字
                         fo = dict(job.form_options(nnn))
                         st.selectbox("材料表品項（選用）", [-1] + list(fo), key=f"form{nnn}",
@@ -368,7 +372,8 @@ def page():
             if job.pending_base():
                 guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
             chosen = {r["nnn"]: (S[f"form{r['nnn']}"], bool(S.get(f"fsame{r['nnn']}"))) for r in todo if S.get(f"form{r['nnn']}", -1) >= 0}
-            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries)), chosen)
+            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries), {
+                r["nnn"]: S.get(f"sug{r['nnn']}", "") for r in todo}), chosen)
             job.save_entries(S.entries)
             guard(job.build)
             guard(job.preflight_deliver)
@@ -402,11 +407,11 @@ def page():
                     if e.get("photo"):
                         st.image(job.p(e["photo"]), width="stretch")
                 with c2:
-                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec")
-                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item")
+                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec", max_chars=max(200, len(e["sec"])))
+                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item", max_chars=max(200, len(e["item"])))
                     st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=pl.MAX_TEXT)
                     st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=pl.MAX_TEXT)
-                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg")
+                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg", max_chars=max(200, len(e["bldg"])))
             if st.button("重新產出 Excel"):
                 for i, e in enumerate(ents):
                     e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()

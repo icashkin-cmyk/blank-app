@@ -184,8 +184,12 @@ kind 只能是 """ + "、".join(KINDS) + """ 其中一個；fixed 是 {"工程�
 我會把你輸出的 JSON 貼到網頁，和照片一起上傳。"""
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")   # 同 pipeline.CTRL：Excel 不收的控制字元
+FIELD_MAX = 200                                          # 單行欄位（工程資料、項目、位置、人員、日期、建議項目…）每欄上限
+
+
 def _one_line(s: str) -> str:
-    return " ".join(s.split())                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
+    return " ".join(_CTRL.sub("", s).split())                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
 
 
 def _find_json(text: str):
@@ -253,8 +257,10 @@ def parse_import(data: bytes) -> dict:
             clean["kind"] = "其他"
         read = PhotoRead.from_dict(clean)
         # 上限算「組成草稿後」的長度（每筆讀數、每個欄位組成草稿時會多出標籤字），不是原始字數
-        if any(len(x) > 200 for x in clean["fixed"].values()) or len(compose_text(read)) > IMPORT_PHOTO_MAX:
-            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料每欄上限 200 字、組成草稿後上限 {IMPORT_PHOTO_MAX} 字）")
+        single = list(clean["fixed"].values()) + [v for k, v in clean.items() if isinstance(v, str) and k != "scene"]
+        if any(len(x) > FIELD_MAX for x in single) or len(compose_text(read)) > IMPORT_PHOTO_MAX:
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料、項目、位置、人員、日期、建議項目每欄上限 {FIELD_MAX} 字，"
+                             f"組成草稿後上限 {IMPORT_PHOTO_MAX} 字）")
         out[re.split(r"[\\/]", str(key))[-1].strip().lower()] = read
     return out
 
