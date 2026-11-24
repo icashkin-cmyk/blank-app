@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -875,7 +876,8 @@ def test_apply_suggestions_uses_only_what_user_confirmed():
     assert [e["item"] for e in got] == ["使用者改過", ""]
     assert [e["item"] for e in j.apply_suggestions(ents(), {})] == ["", ""]
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(job.make_entries(), job.confirmed_sug)" in src
+    psrc = Path(pl.__file__).read_text(encoding="utf-8")
+    assert 'key=f"sug{nnn}"' in src and "self.apply_suggestions(self.make_entries(), self.confirmed_sug)" in psrc
 
 
 def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
@@ -908,8 +910,10 @@ def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
 def test_r4_confirmed_values_kept_on_job_and_notes_reset():
     """稽核 v3 第 4 輪必修 3、4：確認過的建議項目與材料表品項在按產出當下記在工作上（部分寫入失敗後重試不會掉）；每批開始一律重設提醒。"""
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    assert 'job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")' in src and "job.apply_suggestions(job.make_entries(), job.confirmed_sug)" in src
-    assert "job.chosen_forms[nnn] = " in src and "job.chosen_forms)" in src
+    psrc = Path(pl.__file__).read_text(encoding="utf-8")
+    assert 'S.get(f"sug{r[\'nnn\']}", "")' in src and "job.produce(inputs, fx)" in src
+    assert "self.confirmed_sug[nnn] = sug" in psrc and "self.apply_suggestions(self.make_entries(), self.confirmed_sug)" in psrc
+    assert "self.chosen_forms[nnn] = " in psrc and "self.chosen_forms)" in psrc
     assert src.index("S.notes = {}") < src.index("S.notes = S.job.auto_read(")
     psrc = Path(pl.__file__).read_text(encoding="utf-8")
     assert "self.confirmed_sug" in psrc and "self.chosen_forms" in psrc
@@ -970,8 +974,9 @@ def test_r6_output_scan_and_long_names_and_no_truncation(tmp_path):
     pl.check_name_len("IMG_0001 (2).jpeg")
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
     assert "__class__.__name__" not in src
-    assert "max_chars=pl.MAX_TEXT" not in src and src.count("max_chars=max(pl.MAX_TEXT, pl.u16(") >= 3
-    assert "pl.check_name_len(" in src and "job.check_output" in src and "pl.STUCK" in src
+    assert "max_chars=pl.MAX_TEXT" not in src
+    psrc = Path(pl.__file__).read_text(encoding="utf-8")
+    assert "pl.check_name_len(" in src and "job.check_output" in src and "self.check_output()" in psrc and "STUCK in str(e)" in psrc
 
 
 def test_r7_x005f_and_done_page_ctrl():
@@ -1017,5 +1022,72 @@ def test_r10_max_chars_counts_utf16():
     """稽核 v3 第 10 輪：Streamlit 前端用 UTF-16 長度比 max_chars；罕用字（𠮷、表情符號）算 2 個，上限要照 UTF-16 長度放寬，否則修改會被丟掉。"""
     assert pl.u16("甲𠮷😀") == 5 and pl.u16("") == 0
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    assert "max_chars=max(pl.MAX_TEXT, len(" not in src and src.count("max_chars=max(pl.MAX_TEXT, pl.u16(") == 3
-    assert src.count("max_chars=max(200, pl.u16(") == 5 and "max_chars=200" not in src and "max_chars=max(200, len(" not in src
+    assert "max_chars=max(pl.MAX_TEXT, len(" not in src and "max_chars=200" not in src and "max_chars=max(200, len(" not in src
+
+
+def test_r11_limits_fixed_per_job_and_no_silent_cut(tmp_path):
+    """稽核 v3 第 11 輪必修 2、3：輸入框上限不可跟著目前輸入值變（Streamlit 一換 max_chars 就重置元件、欄位被清空）；
+    上限以字數算、這一批第一次看到時定下；超過時擋下並說明，不靜默截斷。"""
+    class J(pl.Job):
+        def __init__(self):
+            self.reads = {}
+        def manifest(self):
+            return [{"nnn": "001", "sha256": "s1", "列號": "A:4"}]
+    j = J()
+    assert j.limit("fx", 200, "甲" * 150, "𠮷" * 250) == 250
+    assert j.limit("fx", 200, "") == 250 and j.limit("fx", 200, "甲" * 900) == 250      # 定下後不再變
+    assert j.limit("other", 200) == 200
+    pl.check_len("𠮷" * 200, 200, "第 1 張的檢查項目")                                   # 以字數算：200 個罕用字可以
+    with pytest.raises(pl.PipelineError, match=r"第 1 張的檢查項目.*上限 200 字.*目前 250 字"):
+        pl.check_len("𠮷" * 50 + "甲" * 199 + "尾", 200, "第 1 張的檢查項目")
+    long = "𠮷" * 50 + "甲" * 199 + "尾"
+    got = j.apply_suggestions([{"_sheet": "A", "_row": 4, "item": "", "design": [], "measured": []}], {"001": long})
+    assert got[0]["item"] == long                                                        # 不截斷
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "max_chars=max(" not in src and "pl.u16(S" not in src                         # 上限不跟目前的值連動
+    assert src.count("max_chars=2 * job.limit(") == 8 and src.count("pl.check_len") >= 4
+
+
+def test_r11_produce_runs_once_at_a_time():
+    """稽核 v3 第 11 輪必修 1：連按兩下「產出 Excel」不可同時跑兩次流程。同一個工作一次只跑一輪，後到的等前一輪做完，不重做。"""
+    class J(pl.Job):
+        def __init__(self):
+            pass
+    j = J()
+    seen = []
+    with j.working() as mine:
+        seen.append(mine)
+        import threading
+        def other():
+            with j.working(wait=5) as m:
+                seen.append(m)
+        t = threading.Thread(target=other)
+        t.start(); time.sleep(0.3)
+        assert seen == [True]                                                            # 另一輪還在等
+    t.join(5)
+    assert seen == [True, False]                                                         # 等到了，但被告知「前一輪剛做完，不要重做」
+    with j.working() as again:
+        assert again is True
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'if st.button("產出 Excel"' not in src and 'if st.button("重新產出 Excel")' not in src
+    assert src.count("with job.working() as mine:") == 2 and "guard(job.wait_idle)" in src
+
+
+def test_r11_produce_is_one_uninterruptible_step(job):
+    """稽核 v3 第 11 輪必修 1：產出整段在 Job.produce 裡跑完並回傳結果（不碰畫面狀態，第二下按鈕中斷不了）；
+    寫不進去時回到確認頁並說明，重試成功。"""
+    rows = _three(job)
+    fx = {"工程名稱": "〈甲〉", "監造單位": "", "承造單位": ""}
+    good = {r["nnn"]: (BODY, "", -1, False) for r in rows}
+    bad = dict(good); bad[rows[1]["nnn"]] = ("亂寫的第一行\n" + BODY, "", -1, False)
+    kind, msg = job.produce(bad, fx)
+    assert kind == "review" and "沒有寫入" in msg and "第 2 張" in msg and pl.STUCK not in msg
+    left = [r["nnn"] for r in job.stopped()]
+    assert left == [rows[1]["nnn"]]
+    kind, ents = job.produce({n: good[n] for n in left}, fx)
+    assert kind == "done" and len(ents) == 3 and job.pdf is None
+    assert os.path.exists(job.p(pl.OUTPUT))
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    i1 = src.index("job.outcome = job.produce(inputs, fx)")
+    i0 = src.rindex("job.go = False", 0, i1)
+    assert "S." not in src[i0:i1] and "S[" not in src[i0:i1] and "st." not in src[i0:i1]   # 中間不可有會被中斷的地方
