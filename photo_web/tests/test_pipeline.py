@@ -995,9 +995,15 @@ def test_r7_x005f_and_done_page_ctrl():
 def test_r8_question_total_precheck_and_import_keeps_spaces():
     """稽核 v3 第 8 輪：〔?〕自動編號會超過 999 的情況在寫入前就擋下，訊息講實際原因；匯入時中間的空白（連續、全形、NBSP）原樣。"""
     pl.check_q_total(["甲〔?〕乙〔?12〕", "〔?〕" * 900])
-    for texts in (["〔?〕" * 1000], ["甲〔?999〕乙〔?〕"], ["〔?٣٣٣٣٣〕〔?〕"], ["〔?〕" * 500, "〔?〕" * 500]):
+    for texts in (["〔?〕" * 1000], ["甲〔?999〕乙〔?〕"], ["〔?٣٣٣٣٣〕〔?〕"], ["甲", "〔?998〕〔?〕〔?〕"]):
         with pytest.raises(pl.PipelineError, match="999"):
             pl.check_q_total(texts)
+    pl.check_q_total(["〔?〕" * 500, "〔?〕" * 500, "〔?999〕", "〔?〕"])       # 第 9 輪建議 1：Skill 每張各自編號，逐張算，不合計
+    with pytest.raises(pl.PipelineError, match="第 2 張"):
+        pl.check_q_total(["甲", "〔?〕" * 1000])
+    with pytest.raises(pl.PipelineError, match="超過 3 位數"):          # 第 9 輪必修 2：〔?0001〕不是「超過 999」
+        pl.check_x("〔?0001〕", "第 1 張")
+    assert "white-space:pre-wrap" in (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")   # 第 9 輪必修 1：檔名的連續空白照樣顯示
     d = rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": " 甲　乙  工程 "}, "inspector": "林　明", "item": "品 名",
                                               "lines": ["A  B　C\tD"], "suggest_item": "建  議　項"}}, ensure_ascii=False).encode())["a.jpg"]
     assert (d.fixed["工程名稱"], d.inspector, d.item, d.lines, d.suggest_item) == ("甲　乙  工程", "林　明", "品 名", ["A  B　C D"], "建  議　項")

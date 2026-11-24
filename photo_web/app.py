@@ -71,7 +71,7 @@ _SAY = {"error": "background:rgba(255,43,43,.14);border-left:4px solid #ff4b4b;p
 def say(kind: str, text: str) -> None:
     """含外來文字（匯入的讀圖檔、自動讀到的字、檔名）的提示：跳脫成純文字後用 st.html 顯示，完全不經 Markdown，
     不會變成圖片（瀏覽器對外連線）、連結、粗體、表情符號，也不會被改寫（-> 變箭頭）。"""
-    st.html(f'<div style="{_SAY[kind]};overflow-wrap:anywhere">{html.escape(str(text))}</div>')
+    st.html(f'<div style="{_SAY[kind]};overflow-wrap:anywhere;white-space:pre-wrap">{html.escape(str(text))}</div>')
 
 
 def show_result(res):
@@ -374,7 +374,7 @@ def page():
                     except pl.PipelineError as e:
                         bad.append(str(e))
             try:
-                pl.check_q_total([S[f"t{r['nnn']}"] for r in todo])
+                pl.check_q_total([S[f"t{r['nnn']}"] for r in todo], [int(r["nnn"]) for r in todo])
             except pl.PipelineError as e:
                 bad.append(str(e))
             if bad:
