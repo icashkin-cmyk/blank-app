@@ -15,7 +15,7 @@ import reader as rd
 
 LOW, DROP = 0.90, 0.50                 # 低於 LOW 加〔?〕；低於 DROP 整格只留〔?〕（手寫字信心 0.8 上下仍常讀錯，門檻取高）
 Q = "〔?〕"
-KEEP = "台干后里面表板系布余松斗谷制范云几卷只才"   # 繁體也在用的字：不轉換（「台南」不可變成「臺南」）
+FORCE = "厂机体万与网气"                    # Big5 有收、但臺灣的工地文字與人名幾乎不會用到的簡體寫法（廠機體萬與網氣）：照簡體字轉
 
 LABELS = [                              # (欄位鍵, 標籤寫法)；順序＝比對優先序
     ("工程名稱", r"工.名[稱称]"),           # 中間一字放寬：印刷標籤也會被讀錯一個字（例「工解名稱」）
@@ -53,23 +53,45 @@ class Box:
 
 
 _cc = None
+_t2s = None
+
+
+STAY = "温着"                              # 臺灣也在用（姓氏、異體）但下列兩個判斷都抓不到的字：不動
+
+
+def _simp_only(ch: str) -> bool:
+    """是不是「只會是簡體」的字：FORCE 內的字；或同時符合「cp950（Big5 含擴充字）沒收」與「本身不是繁體字形」
+    （OpenCC 繁→簡會改它的字就是繁體字形，例 啓、峯、裏、羣、衆：這些是異體，不是簡體，不動）。"""
+    if ch in FORCE:
+        return True
+    if ch in STAY:
+        return False
+    try:
+        ch.encode("cp950")
+        return False
+    except UnicodeEncodeError:
+        pass
+    return not _t2s or _t2s.convert(ch) == ch
 
 
 def to_trad(s: str) -> str:
-    """簡體字形轉繁體（OCR 模型常輸出簡體）；KEEP 內的字不動。沒裝 opencc 就原樣回傳。"""
-    global _cc
+    """簡體字形轉繁體（OCR 模型常輸出簡體）。只轉「只會是簡體」的字（判斷見 _simp_only），逐字對位；繁體也在用的字一律不動
+    （范、余、于、里、后、斗、杰、制、台、污、游…；人名、地名、材料表用字都不會被改寫。2026-11-23 稽核第 3、4 輪）。
+    代價：簡體詞裡這類字會留著（规范→規范、这里→這里、后面→后面），要在確認頁自己改。
+    轉換後字數不同（無法逐字對位）或沒裝 opencc 時原樣回傳。"""
+    global _cc, _t2s
     if _cc is None:
         try:
             import opencc
-            _cc = opencc.OpenCC("s2t")
+            _cc, _t2s = opencc.OpenCC("s2tw"), opencc.OpenCC("t2s")
         except Exception:
             _cc = False
-    if not _cc:
+    if not _cc or not s:
         return s
-    out = []
-    for ch in s:
-        out.append(ch if ch in KEEP or ord(ch) < 0x2E80 else _cc.convert(ch))
-    return "".join(out)
+    out = _cc.convert(s)
+    if len(out) != len(s):
+        return s
+    return "".join(b if a != b and _simp_only(a) else a for a, b in zip(s, out))
 
 
 def mark(text: str, score: float) -> str:

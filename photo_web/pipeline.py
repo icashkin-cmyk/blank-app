@@ -43,6 +43,8 @@ TEXT_FIELDS = ["查驗時間", "照片日期", "查驗項目", "位置", "檢查
 FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
 Q_MARK = "〔?〕"
 MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
+SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
 
 
@@ -493,9 +495,9 @@ class Job:
         if row is None:
             raise PipelineError(f"manifest 沒有第 {nnn} 張")
         path = self.p("text", f"{nnn}.txt")
-        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{body.strip()}\n")
+        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{CTRL.sub('', body).strip()}\n")
         given = fixed is not None
-        fixed = {k: v.strip() for k, v in (fixed or {}).items() if v and v.strip()}
+        fixed = {k: CTRL.sub("", v).strip() for k, v in (fixed or {}).items() if v and CTRL.sub("", v).strip()}
         fpath = self.p("fixed", f"{nnn}.txt")
         if fixed:
             os.makedirs(self.p("fixed"), exist_ok=True)
@@ -525,6 +527,10 @@ class Job:
             out[f] = opts
         return out
 
+    def fixed_defaults(self) -> dict[str, str]:
+        """確認頁工程資料三欄的預設值：依「現在還在這一批」的照片取（拿掉照片後要重算）。"""
+        return {f: (o[0][0] if o else "") for f, o in self.fixed_options().items()}
+
     def fixed_for(self, nnn: str, confirmed: dict[str, str]) -> dict[str, str]:
         """這一張要寫入的固定欄位：使用者在確認頁確認過的整批值。
         有讀圖草稿時：這張照片上讀得到的欄位用確認值（照片上沒有、別張才有的欄位不帶入）；
@@ -541,17 +547,34 @@ class Job:
         """哪幾張讀到的固定欄位和整批確認的值「差很多」（可能是別的工程的照片）：{nnn: [(欄位, 這張讀到的寫法)]}。
         只差幾個字（讀錯字）不算；沒讀清楚（〔?〕）的寫法去掉標記後字數太少也不比。"""
         import difflib
+
+        def suffix(x: str) -> str:
+            return next((suf for suf in SUFFIXES if x.endswith(suf) and len(x) - len(suf) >= 2), "")
+
+        def cores(p: str, q: str) -> tuple[str, str] | None:
+            """兩邊都讀到完整後綴時回傳去掉後綴的核心；一邊的後綴是另一邊的尾段時（有限公司／股份有限公司），兩邊都去掉較短的那個。
+            任一邊後綴沒讀完整（讀錯字）就回傳 None，只比全名。"""
+            sp, sq = suffix(p), suffix(q)
+            if not sp or not sq:
+                return None
+            if sp != sq and (sp.endswith(sq) or sq.endswith(sp)):
+                sp = sq = min(sp, sq, key=len)
+            return p[:-len(sp)], q[:-len(sq)]
+        strip = lambda x: (x or "").replace(Q_MARK, "").strip()
+        ratio = lambda p, q: difflib.SequenceMatcher(None, p, q).ratio()
         out: dict[str, list[tuple[str, str]]] = {}
         todo = {r["nnn"] for r in self.stopped()}
         for nnn, v in self.draft_fixed.items():
             if nnn not in todo:
                 continue
             for f in FIXED_FIELDS:
-                want = (confirmed.get(f) or "").replace(Q_MARK, "").strip()
-                got = (v.get(f) or "").replace(Q_MARK, "").strip()
+                want, got = strip(confirmed.get(f)), strip(v.get(f))
                 if len(want) < 2 or len(got) < 2:
                     continue
-                if difflib.SequenceMatcher(None, want, got).ratio() < MISMATCH_RATIO:
+                # 全名差很多；或兩邊都讀到完整後綴、沒有〔?〕、而核心完全對不上（「○○建築師事務所」之間後綴相同會把不同公司算成相似）。
+                # 後綴被讀錯或有〔?〕時只比全名，避免把同一家公司誤報（2026-11-23 稽核第 3～5 輪）。
+                c = cores(want, got) if Q_MARK not in (v.get(f) or "") else None
+                if ratio(want, got) < MISMATCH_RATIO or (c and ratio(*c) < 0.34):
                     out.setdefault(nnn, []).append((f, v[f].strip()))
         return out
 
@@ -621,6 +644,52 @@ class Job:
                 e["measured"] = [m for m in e["measured"] if not m.startswith("（量測讀數：")] + meas
         return entries
 
+    # ---------- 材料表品項（使用者在確認頁用選的，不靠讀字）----------
+    def forms(self) -> list[tuple[str, str, list[str]]]:
+        """Skill 內建材料表（forms.csv）：[(工作表, 材料/設備名稱, [設計/標準值各行])]，寫法用 Skill 自己的 form_lines。"""
+        if getattr(self, "_forms", None) is None:
+            import importlib.util
+            path = os.path.join(self.scripts, "forms.csv")
+            spec = importlib.util.spec_from_file_location("_photo_skill_log_photo", os.path.join(self.scripts, "log_photo.py"))
+            lp = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(lp)
+                self._forms = [(f[0], f[1], lp.form_lines(f)) for f in lp.load_forms(path)]
+            except Exception:                              # 讀不到材料表：不提供選單，其餘流程照常
+                self._forms = []
+        return self._forms
+
+    def form_options(self, nnn: str) -> list[tuple[int, str]]:
+        """這一張照片的材料表選單：(材料表序號, 顯示文字)，和這張讀到的字比較像的排前面。"""
+        text = re.sub(r"\s+", "", self.draft(nnn))
+        toks_of = lambda x: set(re.findall(r"[A-Za-z0-9.]{2,}", x))
+        cjk_of = lambda x: {x[i:i + 2] for i in range(len(x) - 1) if all("\u4e00" <= c <= "\u9fff" for c in x[i:i + 2])}
+        tt, tc = toks_of(text), cjk_of(text)
+
+        def score(f):                                      # 型號規格字樣相同最重要，其次是中文兩字詞（廠牌、品名）重疊
+            hay = f[0] + f[1] + "".join(f[2])
+            return 2.0 * len(tt & toks_of(hay)) + 1.0 * len(tc & cjk_of(hay)) - 0.01 * len(f[2])
+        order = sorted(range(len(self.forms())), key=lambda i: -score(self.forms()[i]))
+        return [(i, f"{self.forms()[i][0]}｜{self.forms()[i][1]}｜" + "、".join(self.forms()[i][2])[:60]) for i in order]
+
+    def apply_forms(self, entries: list[dict], chosen: dict[str, tuple[int, bool]]) -> list[dict]:
+        """使用者選了材料表品項的照片：檢查項目用材料表的材料/設備名稱，設計/標準值用「工作表名稱＋品質管理標準」
+        （和 make_entries 對到材料表時的寫法相同）；意象行保留。same 為真（使用者勾「實測與材料表相符」）時實測值同寫。
+        只改 entries，不改工作檔原文。"""
+        where = {r["列號"]: r["nnn"] for r in self.manifest() if r.get("列號")}
+        for e in entries:
+            pick = chosen.get(where.get(f"{e['_sheet']}:{e['_row']}", ""))
+            if not pick or not (0 <= pick[0] < len(self.forms())):
+                continue
+            sheet, name, lines = self.forms()[pick[0]]
+            scene = [ln for ln in e["design"] if ln.startswith("（意象：")]
+            old_design = set(e["design"])
+            e["item"], e["design"] = name, [sheet] + list(lines) + scene
+            if pick[1]:                                    # 相符同寫；原本只在實測欄的內容（白板實測、量測讀數）留在後面，不覆蓋
+                form = [sheet] + list(lines)
+                e["measured"] = form + [m for m in e["measured"] if m not in old_design and m not in form]
+        return entries
+
     def check_report(self) -> str:
         """每一步的命令、結束碼與輸出，跟 Excel 一起交（2026-11-22 稽核：交付物缺交檔檢查紀錄）。"""
         src = skill_source()
@@ -670,6 +739,8 @@ class Job:
         return json.load(open(self.p(out), encoding="utf-8"))
 
     def save_entries(self, entries: list[dict]) -> None:
+        clean = lambda x: CTRL.sub("", x) if isinstance(x, str) else [CTRL.sub("", y) if isinstance(y, str) else y for y in x] if isinstance(x, list) else x
+        entries[:] = [{k: clean(v) for k, v in e.items()} for e in entries]     # 貼上的控制字元 Excel 不收
         json.dump(entries, open(self.p("entries.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     def build(self) -> StepResult:
@@ -680,7 +751,7 @@ class Job:
     def strings_only(self) -> int:
         """產出檔裡不得有公式：照片或使用者的字以「=」開頭時會被寫成公式（2026-11-23 稽核），這裡一律改回文字，字本身不動。
         公司範本沒有公式（有的話這一步會把它變成文字，交檔檢查與測試會看得到）。回傳改了幾格。"""
-        wb = load_workbook(self.p(OUTPUT))
+        wb = load_workbook(self.p(OUTPUT), rich_text=True)   # rich_text：隱藏「原文」分頁的紅字標記重存後要留著
         n = 0
         for ws in wb:
             for row in ws.iter_rows():

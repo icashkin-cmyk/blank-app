@@ -590,11 +590,11 @@ def test_other_project_photo_is_flagged(job):
     """必修 2：某張讀到的工程資料和整批確認的值差很多（可能是別的工程）要指出是哪一張；只差一兩個字（讀錯字）不算。"""
     rows = _three(job)
     a, b, c = (r["nnn"] for r in rows)
-    job.draft_fixed = {a: {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所"},
-                       b: {"工程名稱": "〈甲〉市文化國區二湖改造工程〔?〕", "監造單位": "〔?〕"},
-                       c: {"工程名稱": "測試市甲乙大樓新建工程", "監造單位": "〈乙〉建築師事務所"}}
-    ok = {"工程名稱": "〈甲〉市文化園區二期改造工程", "監造單位": "〈乙〉建築師事務所", "承造單位": ""}
-    assert job.fixed_mismatch(ok) == {c: [("工程名稱", "測試市甲乙大樓新建工程")]}
+    job.draft_fixed = {a: {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "甲乙丙建築師事務所"},
+                       b: {"工程名稱": "測試市東西南比館舍增建工種〔?〕", "監造單位": "〔?〕"},
+                       c: {"工程名稱": "範例縣某某國小校舍拆除工程", "監造單位": "甲乙丙建築師事務所"}}
+    ok = {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "甲乙丙建築師事務所", "承造單位": ""}
+    assert job.fixed_mismatch(ok) == {c: [("工程名稱", "範例縣某某國小校舍拆除工程")]}
 
 
 def test_drop_photo_excludes_it_from_output(job):
@@ -610,3 +610,121 @@ def test_drop_photo_excludes_it_from_output(job):
     assert job.stopped() == []
     assert "交檔結果：全部 PASS" in _produce(job).stdout
     assert len(load_workbook(job.p(pl.OUTPUT)).active._images) == 2
+
+
+def test_chosen_material_form_fills_item_and_design(job):
+    """MIKO 2026-11-23「用水電材料加強」：使用者在確認頁選材料表品項後，檢查項目與設計/標準值照材料表，不靠讀字。"""
+    rows = _three(job)
+    forms = job.forms()
+    assert len(forms) >= 10 and all(f[0] and f[1] and f[2] for f in forms)
+    opts = job.form_options(rows[0]["nnn"])
+    assert sorted(i for i, _ in opts) == list(range(len(forms)))
+    for r in rows:                                        # 讀錯的查驗項目：make_entries 自己對不到材料表
+        job.write_text(r["nnn"], BODY.replace("EMT管材料進場", "〈讀錯的字〉材追場"), {"工程名稱": "〈甲〉"})
+    job.addmany()
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    ents = job.make_entries()
+    before = [dict(e) for e in ents]
+    a, b = rows[0]["nnn"], rows[1]["nnn"]
+    ents = job.apply_forms(ents, {a: (3, False), b: (5, True)})
+    assert ents[0]["item"] == forms[3][1] and ents[0]["design"] == [forms[3][0]] + forms[3][2]
+    assert ents[0]["measured"] == before[0]["measured"]              # 沒勾「相符」：實測值不動
+    assert ents[1]["measured"] == ents[1]["design"] == [forms[5][0]] + forms[5][2]
+    assert ents[2] == before[2]                                      # 沒選的照片不動
+    job.save_entries(ents); job.build()
+    assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout
+
+
+def test_other_company_with_common_suffix_is_flagged(job):
+    """稽核第 2 輪建議 1：公司名共用「建築師事務所」「營造有限公司」這類後綴時，不同公司也要被指出。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    job.draft_fixed = {a: {"監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"},
+                       b: {"監造單位": "甲乙西建築師事務所", "承造單位": "東南營造有限公司"},      # 讀錯一個字：不算
+                       c: {"監造單位": "虛構建築師事務所", "承造單位": "範例營造有限公司"}}
+    ok = {"工程名稱": "", "監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"}
+    assert job.fixed_mismatch(ok) == {c: [("監造單位", "虛構建築師事務所"), ("承造單位", "範例營造有限公司")]}
+
+
+def test_fixed_defaults_follow_remaining_photos_after_drop(job):
+    """稽核第 2 輪必修 1：拿掉照片後，工程資料的預設要依剩下的照片重算；被拿掉那張的值不得留著。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    job.draft_fixed = {a: {"工程名稱": "測試市東西南北館舍增建工程"}, b: {"工程名稱": "測試市東西南北館舍增建工程"},
+                       c: {"工程名稱": "範例縣某某國小校舍拆除工程", "承造單位": "範例營造有限公司"}}
+    assert job.fixed_defaults() == {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "", "承造單位": "範例營造有限公司"}
+    job.drop(c)
+    assert job.fixed_defaults() == {"工程名稱": "測試市東西南北館舍增建工程", "監造單位": "", "承造單位": ""}
+
+
+def test_control_characters_do_not_break_writing(job):
+    """稽核第 2 輪建議 5：貼上的文字帶控制字元時不得整批寫入失敗。"""
+    rows = _three(job)
+    for i, r in enumerate(rows):
+        job.write_text(r["nnn"], BODY.replace("〈規格〉", "E19\x07\x0b" if i == 0 else "E25"), {"工程名稱": "測試工程\x08"})
+    job.addmany()
+    assert job.stopped() == []
+    assert "交檔結果：全部 PASS" in _produce(job).stdout
+
+
+def test_strings_only_keeps_rich_text_of_hidden_sheets(job):
+    """稽核第 2 輪建議 2：有公式格而重存時，隱藏「原文」分頁的紅字標記不得被壓平。"""
+    from openpyxl.cell.rich_text import CellRichText
+    rows = _three(job)
+    for i, r in enumerate(rows):
+        job.write_text(r["nnn"], BODY.replace("〈規格〉", "E1〔?〕9") if i else BODY.replace("EMT管 〈規格〉｜〈數量〉", "=1+1"), {"工程名稱": "測試工程"})
+    job.addmany(); _produce(job)
+    wb = load_workbook(job.p(pl.OUTPUT), rich_text=True)
+    rich = [c for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, CellRichText)]
+    assert rich, "原文分頁的紅字標記不見了"
+
+
+def test_misread_suffix_of_same_company_is_not_flagged(job):
+    """稽核第 3 輪必修 2：同一家公司只是後綴被讀錯（去不掉後綴）時不得誤報成別的工程。"""
+    rows = _three(job)
+    a, b, c = (r["nnn"] for r in rows)
+    ok = {"工程名稱": "", "監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"}
+    job.draft_fixed = {a: {"監造單位": "甲乙丙建築師事務所", "承造單位": "東南營造有限公司"},
+                       b: {"監造單位": "甲乙丙建築師事〔?〕", "承造單位": "東南營造有限公"},
+                       c: {"監造單位": "甲乙丙建築帥事務", "承造單位": "東商菅造有限公司"}}      # 兩邊去掉的後綴不同：不比核心（稽核第 4 輪建議 2）
+    assert job.fixed_mismatch(ok) == {}
+    job.draft_fixed = {a: {"承造單位": "東商營造有限公司"}}                # 同後綴、核心讀錯 1 字：不算
+    assert job.fixed_mismatch(ok) == {}
+    # 稽核第 5 輪建議 1：後綴不同的別家公司也要指出（一邊的後綴是另一邊的尾段時，去掉較短的那個再比）
+    job.draft_fixed = {a: {"承造單位": "西北營造股份有限公司"}, b: {"監造單位": "丁戊己聯合建築師事務所"}}
+    assert job.fixed_mismatch(ok) == {a: [("承造單位", "西北營造股份有限公司")], b: [("監造單位", "丁戊己聯合建築師事務所")]}
+
+
+def test_same_as_form_keeps_board_measurements(job):
+    """稽核第 3 輪必修 4：勾「實測值與材料表相符」時，白板實測與量測讀數要留著（SKILL：量測讀數只進實測值、白板實測一併保留）。"""
+    rows = _three(job)
+    forms = job.forms()
+    for r in rows:
+        job.write_text(r["nnn"], BODY, {"工程名稱": "測試工程"})
+    job.addmany()
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    ents = job.make_entries()
+    ents[0]["design"], ents[0]["measured"] = ["〈規格甲〉", "〈規格乙〉"], ["〈規格甲〉", "3660mm", "管長：366 cm（捲尺讀數）"]
+    ents[1]["design"] = ents[1]["measured"] = ["〈讀錯的品名〉｜5"]
+    a, b = rows[0]["nnn"], rows[1]["nnn"]
+    ents = job.apply_forms(ents, {a: (5, True), b: (5, True)})
+    want = [forms[5][0]] + forms[5][2]
+    assert ents[0]["measured"] == want + ["3660mm", "管長：366 cm（捲尺讀數）"]
+    assert ents[1]["measured"] == want                               # 實測欄和設計欄本來相同（只有品名規格的白板）：不重複留讀字內容
+
+
+def test_control_characters_in_edited_entries(job):
+    """稽核第 3 輪建議 5：下載頁「修改欄位」貼入控制字元或 U+FFFE 不得讓產出失敗。"""
+    rows = _three(job)
+    for r in rows:
+        job.write_text(r["nnn"], BODY + "補一行\ufffe\uffff", {"工程名稱": "測試工程"})
+    job.addmany()
+    assert job.stopped() == []
+    if job.pending_base():
+        job.confirm_base(["--all"])
+    ents = job.make_entries()
+    ents[0]["item"] = "EMT\x07導線管"; ents[0]["design"] = ["甲\x0b乙", "丙\ufffe"]
+    job.save_entries(ents); job.build()
+    assert "交檔結果：全部 PASS" in job.preflight_deliver().stdout

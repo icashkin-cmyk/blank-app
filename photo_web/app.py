@@ -1,6 +1,6 @@
 """photo_web/app.py｜上傳照片 → 自動讀字草稿、一頁確認（可全選）→ 既有腳本產出「材料自主檢查照片.xlsx」。
 執行：streamlit run photo_web/app.py
-讀圖（reader.py）有固定答案、Claude API、人工抄寫三種；規則照 photo-inspection-log SKILL.md。"""
+讀圖（reader.py）依序是固定答案（測試）、Claude API（有金鑰與名單才用）、本機 OCR（預設，不用金鑰）、人工抄寫；規則照 photo-inspection-log SKILL.md。"""
 import logging
 import os
 import sys
@@ -235,10 +235,17 @@ def page():
             # 固定欄位：整批共用，預設取各張讀到的多數寫法；使用者在這裡確認一次（各張寫法不同時不再逐張擋下）
             st.subheader("工程資料（整批共用，確認一次）")
             opts = job.fixed_options()
+
+            def _fx_changed():                                # 工程資料一改：先前勾的「是同一個工程」不算數，要重新確認
+                S.fxver = S.get("fxver", 0) + 1               # 勾選格換新的 key：舊的勾（含瀏覽器端留著的狀態）全部失效（稽核第 3 輪必修 3）
+            if S.get("fixed_note"):
+                st.warning(S.pop("fixed_note"))
             cols = st.columns(3)
             for c, f in zip(cols, pl.FIXED_FIELDS):
                 with c:
-                    st.text_input(f, value=(opts[f][0][0] if opts[f] else ""), key=f"fx{f}", max_chars=200)
+                    if f"fx{f}" not in S:
+                        S[f"fx{f}"] = opts[f][0][0] if opts[f] else ""
+                    st.text_input(f, key=f"fx{f}", max_chars=200, on_change=_fx_changed)
                     if not opts[f]:
                         st.caption("照片上沒讀到這一欄；知道的話可以自己填（會記在這一批），不知道就留空。")
                     elif len(opts[f]) > 1:
@@ -263,7 +270,17 @@ def page():
                 try:
                     job.drop(nnn)
                 except pl.PipelineError as e:
-                    S.review_err = str(e)
+                    S.review_err = str(e); return
+                for k in (f"ok{nnn}", f"t{nnn}", f"form{nnn}", f"fsame{nnn}"):
+                    S.pop(k, None)
+                new = job.fixed_defaults()                    # 工程資料依剩下的照片重取：被拿掉那張的值不得留著（稽核第 2 輪必修 1）
+                changed = [f for f in pl.FIXED_FIELDS if S.get(f"fx{f}", "") != new[f]]
+                for f in pl.FIXED_FIELDS:
+                    S[f"fx{f}"] = new[f]
+                if changed:
+                    _fx_changed()
+                    S.fixed_note = (f"已拿掉第 {int(nnn)} 張。上面的工程資料（{'、'.join(changed)}）已依剩下的照片重新帶入，"
+                                    "你先前在這幾欄改過的字也一併重設，請再確認一次。")
                 _one()
             st.checkbox("全選：下面每一張我都看過了", key="all_ok", on_change=_all)
             for r in todo:
@@ -279,9 +296,16 @@ def page():
                     if nnn in odd:
                         st.error("這一張讀到的" + "、".join(f"{f}是「{v}」" for f, v in odd[nnn])
                                  + "，和上面確認的不一樣。產出時這一張會記成上面的工程資料。")
-                        st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}")
+                        st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}v{S.get('fxver', 0)}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
-                                 max_chars=pl.MAX_TEXT)
+                                 max_chars=max(pl.MAX_TEXT, len(job.draft(nnn))))
+                    if job.forms():                           # 材料表品項：用選的，不靠讀字
+                        fo = dict(job.form_options(nnn))
+                        st.selectbox("材料表品項（選用）", [-1] + list(fo), key=f"form{nnn}",
+                                     format_func=lambda i, fo=fo: "不指定（照上面的字）" if i < 0 else fo[i],
+                                     help="選了以後，檢查項目與設計/標準值照公司材料表帶入，不用打字；比較像的排在前面。")
+                        if S.get(f"form{nnn}", -1) >= 0:
+                            st.checkbox("實測值與材料表相符（實測值也照材料表寫）", key=f"fsame{nnn}")
                     st.checkbox("我看過這一張了", key=f"ok{nnn}", on_change=_one)
                     if len(todo) > 1:
                         st.button("不放這一張（從這一批拿掉）", key=f"drop{nnn}", on_click=_drop, args=(nnn,))
@@ -292,7 +316,7 @@ def page():
             if miss:
                 st.warning(f"還有 {len(miss)} 張沒打勾（第 {'、'.join(map(str, miss))} 張）。看過後逐張打勾，或勾「全選」。"); st.stop()
             fx = {f: S.get(f"fx{f}", "").strip() for f in pl.FIXED_FIELDS}
-            unsure = [int(n) for n in sorted(job.fixed_mismatch(fx)) if not S.get(f"same{n}")] if todo else []
+            unsure = [int(n) for n in sorted(job.fixed_mismatch(fx)) if not S.get(f"same{n}v{S.get('fxver', 0)}")] if todo else []
             if unsure:
                 st.warning(f"第 {'、'.join(map(str, unsure))} 張可能是別的工程的照片：請在該張下方按「不放這一張」，"
                            "或勾「是同一個工程」。（只有一張時，別的工程請按左側「結束並刪除暫存」重新上傳。）"); st.stop()
@@ -309,7 +333,8 @@ def page():
                     st.rerun()
             if job.pending_base():
                 guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
-            S.entries = job.apply_suggestions(guard(job.make_entries))
+            chosen = {r["nnn"]: (S[f"form{r['nnn']}"], bool(S.get(f"fsame{r['nnn']}"))) for r in todo if S.get(f"form{r['nnn']}", -1) >= 0}
+            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries)), chosen)
             job.save_entries(S.entries)
             guard(job.build)
             guard(job.preflight_deliver)
@@ -323,10 +348,10 @@ def page():
         ents = S.get("entries") or []
         todo_notes = []
         n_sec = sum(1 for e in ents if not e["sec"]); n_item = sum(1 for e in ents if not e["item"])
-        n_q = sum(ln.count("〔?") for e in ents for ln in e["design"] + e["measured"])
+        n_q = sum(ln.count("〔?") for e in ents for ln in e["design"] + e["measured"] + [e["item"], e["sec"]])
         if n_sec: todo_notes.append(f"分項工程名稱未填：{n_sec} 筆（白板上沒有這一欄，要填請用下面的「修改欄位」）")
         if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
-        if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以紅字標出）")
+        if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以〔?1〕〔?2〕這樣的編號標出）")
         if READER and READER.name.startswith("自動讀字"):
             todo_notes.append("內容是自動讀字的草稿加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
         n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})
@@ -368,7 +393,7 @@ def page():
                 st.warning("這個環境沒有 LibreOffice，無法轉 PDF。")
             for r in job.log[-2:]:
                 show_result(r)
-        st.caption("下次接續：在第 1 步上傳這次的材料自主檢查照片.xlsx，照片與原文會帶回來；用「修改欄位」改過的內容不會帶回。")
+        st.caption("下次接續：在第 1 步上傳這次的材料自主檢查照片.xlsx，照片與原文會帶回來；用「修改欄位」改過的內容與選的材料表品項不會帶回，舊照片會回到讀字的內容。")
         if st.button("結束並刪除暫存，處理下一批"):
             reset(); st.rerun()
 

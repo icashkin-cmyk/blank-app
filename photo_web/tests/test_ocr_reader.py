@@ -184,6 +184,7 @@ def test_real_photos_end_to_end(tmp_path):
     notes = j.auto_read(oc.OcrReader())
     assert len(notes) == n and not any("讀圖失敗" in " ".join(v) for v in notes.values())
     fx = {f: (o[0][0] if o else "") for f, o in j.fixed_options().items()}
+    assert j.fixed_mismatch(fx) == {}                            # 稽核第 3 輪必修 2：同一工程的照片不得被指成別的工程
     for r in j.stopped():
         t = j.draft(r["nnn"]).splitlines()
         assert t[0].startswith("查驗時間：") and t[1].startswith("照片日期：")
@@ -206,3 +207,33 @@ def test_empty_label_does_not_take_next_label_as_value():
     bx.append(B(700, 560, 1040, 595, "查驗日期：115.11.23", 0.97))
     r = oc.compose(bx, W, H)
     assert r.inspector == "" and r.inspect_date == "115.11.23"
+
+
+def test_simplified_words_become_traditional():
+    """MIKO 2026-11-23 回報「還有簡體字」：只會是簡體的字都要轉；型號、數字、〔?〕不動。"""
+    pytest.importorskip("opencc")
+    assert oc.to_trad("检查项目 材料进场 厂牌 灯具 发电机 配电柜 开关 电线 数量 规格 型号 长度 镀锌钢管 灭火器 紧急广播 3个 气体 网路") == \
+        "檢查項目 材料進場 廠牌 燈具 發電機 配電柜 開關 電線 數量 規格 型號 長度 鍍鋅鋼管 滅火器 緊急廣播 3個 氣體 網路"
+    assert oc.to_trad("台南 台电 3台 面板 系统 松木 表面") == "台南 台電 3台 面板 系統 松木 表面"   # 「台」不改成「臺」；本來就對的字不動
+    assert oc.to_trad("AB-123 25W 5.5mm²〔?〕") == "AB-123 25W 5.5mm²〔?〕"
+    assert oc.to_trad("") == ""
+
+
+def test_traditional_words_are_never_rewritten():
+    """稽核第 3 輪必修 1：本來就正確的繁體字（含材料表用字）不得被改寫；有簡體字的詞才轉。"""
+    pytest.importorskip("opencc")
+    keep = ["掛式便斗U4360F", "游標卡尺", "液面控制器", "干擾", "里長", "范先生", "余先生", "于先生", "污排水管材料進場", "沉水式污水泵",
+            "水表", "公厘", "面板", "系統", "松木", "表面", "乾燥", "公里", "制水閥", "範圍", "斗", "后", "里", "干", "余", "范", "云", "几",
+            "茶几", "控制箱", "台電", "PVC管 4\"(100mm)", "E19 符合CNS2606"]
+    assert [w for w in keep if oc.to_trad(w) != w] == []
+    # 稽核第 4 輪：跨詞、人名、姓氏後面接簡體字，都不得改到繁體也在用的字；只轉只會是簡體的字
+    names = ["管制作業", "交通管制作業", "控制作動", "管制品", "公里面積", "皇后面前", "王志杰", "林志杰", "胡适", "柜台", "李宁", "种師道", "杰出"]
+    assert [w for w in names if oc.to_trad(w) != w] == []
+    assert oc.to_trad("范大同营造有限公司") == "范大同營造有限公司" and oc.to_trad("余国华") == "余國華"
+    # 稽核第 5 輪：Big5 擴充字與臺灣也在用的異體字（人名、公司名常見）不得被正規化
+    same = ["江啓臣", "林恒毅", "恒壓泵", "恒春鎮", "德峯", "温先生", "裏", "着", "嫺", "羣", "衆", "啓明"]
+    assert [w for w in same if oc.to_trad(w) != w] == []
+    assert oc.mark("恒", 0.99) == "恒"
+    assert oc.to_trad("于国栋") == "于國棟" and oc.to_trad("涂庆文") == "涂慶文"
+    assert oc.to_trad("规范 这里 后面 制造") == "規范 這里 后面 制造"          # 已揭露的限制：這類字留著，由使用者在確認頁改
+    assert oc.to_trad("掛式便斗 规格") == "掛式便斗 規格" and oc.to_trad("污排水管材料进场") == "污排水管材料進場"   # 同一格裡混著簡體字也不改壞
