@@ -970,7 +970,7 @@ def test_r6_output_scan_and_long_names_and_no_truncation(tmp_path):
     pl.check_name_len("IMG_0001 (2).jpeg")
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
     assert "__class__.__name__" not in src
-    assert "max_chars=pl.MAX_TEXT" not in src and src.count("max_chars=max(pl.MAX_TEXT, len(") >= 3
+    assert "max_chars=pl.MAX_TEXT" not in src and src.count("max_chars=max(pl.MAX_TEXT, pl.u16(") >= 3
     assert "pl.check_name_len(" in src and "job.check_output" in src and "pl.STUCK" in src
 
 
@@ -1011,3 +1011,11 @@ def test_r8_question_total_precheck_and_import_keeps_spaces():
     assert "pl.check_q_total(" in src
     with pytest.raises(ValueError, match="太多"):
         rd.parse_import(json.dumps({f"{i}.jpg": {} for i in range(201)}).encode())
+
+
+def test_r10_max_chars_counts_utf16():
+    """稽核 v3 第 10 輪：Streamlit 前端用 UTF-16 長度比 max_chars；罕用字（𠮷、表情符號）算 2 個，上限要照 UTF-16 長度放寬，否則修改會被丟掉。"""
+    assert pl.u16("甲𠮷😀") == 5 and pl.u16("") == 0
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "max_chars=max(pl.MAX_TEXT, len(" not in src and src.count("max_chars=max(pl.MAX_TEXT, pl.u16(") == 3
+    assert src.count("max_chars=max(200, pl.u16(") == 5 and "max_chars=200" not in src and "max_chars=max(200, len(" not in src

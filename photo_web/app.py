@@ -286,7 +286,7 @@ def page():
                 with c:
                     if f"fx{f}" not in S:
                         S[f"fx{f}"] = opts[f][0][0] if opts[f] else ""
-                    st.text_input(f, key=f"fx{f}", max_chars=200, on_change=_fx_changed)
+                    st.text_input(f, key=f"fx{f}", max_chars=max(200, pl.u16(S.get(f"fx{f}", ""))), on_change=_fx_changed)
                     if not opts[f]:
                         st.caption("照片上沒讀到這一欄；知道的話可以自己填（會記在這一批），不知道就留空。")
                     elif len(opts[f]) > 1:
@@ -340,10 +340,10 @@ def page():
                                  + "，和上面確認的不一樣。產出時這一張會記成上面的工程資料。")
                         st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}v{S.get('fxver', 0)}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
-                                 max_chars=max(pl.MAX_TEXT, len(job.draft(nnn))))
+                                 max_chars=max(pl.MAX_TEXT, pl.u16(job.draft(nnn))))
                     if nnn in sugs:                           # 讀圖建議的檢查項目：看得到、可改、可清空，產出時只用這一格的值
                         st.text_input("檢查項目（讀圖建議；照片文字沒有「查驗項目」時才會用，可改、可清空）", value=sugs[nnn],
-                                      key=f"sug{nnn}", max_chars=200)
+                                      key=f"sug{nnn}", max_chars=max(200, pl.u16(sugs[nnn])))
                     if job.forms():                           # 材料表品項：用選的，不靠讀字
                         fo = dict(job.form_options(nnn))
                         st.selectbox("材料表品項（選用）", [-1] + list(fo), key=f"form{nnn}",
@@ -437,11 +437,11 @@ def page():
                     if e.get("photo"):
                         st.image(job.p(e["photo"]), width="stretch")
                 with c2:
-                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec", max_chars=max(200, len(e["sec"])))
-                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item", max_chars=max(200, len(e["item"])))
-                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=max(pl.MAX_TEXT, len("\n".join(e["design"]))))
-                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=max(pl.MAX_TEXT, len("\n".join(e["measured"]))))
-                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg", max_chars=max(200, len(e["bldg"])))
+                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec", max_chars=max(200, pl.u16(e["sec"])))
+                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item", max_chars=max(200, pl.u16(e["item"])))
+                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=max(pl.MAX_TEXT, pl.u16("\n".join(e["design"]))))
+                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=max(pl.MAX_TEXT, pl.u16("\n".join(e["measured"]))))
+                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg", max_chars=max(200, pl.u16(e["bldg"])))
             if st.button("重新產出 Excel"):
                 for i, e in enumerate(ents):
                     e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()

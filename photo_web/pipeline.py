@@ -98,6 +98,11 @@ def check_name_len(name: str) -> None:
         raise PipelineError(f"檔名太長（「{os.path.basename(str(name))[:20]}…」），請把檔名改短（中文約 60 字以內）後重新上傳。")
 
 
+def u16(s) -> int:
+    """UTF-16 長度（瀏覽器與 Streamlit 的 max_chars 用這個算；U+10000 以上的字算 2）。"""
+    return len(str(s or "").encode("utf-16-le", "surrogatepass")) // 2
+
+
 def one_line(s) -> str:
     """單行欄位：換行、定位、U+2028 等空白一律變一個空白。"""
     return " ".join(str(s or "").split())
