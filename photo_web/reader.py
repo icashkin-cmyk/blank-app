@@ -190,7 +190,7 @@ FIELD_MAX = 200                                          # 單行欄位（工程
 
 _QBIG = re.compile(r"〔\?[0-9０-９]{4,}〕")                # 待確認編號太大：拒收並說明（不靜默改）
 _NOTE = re.compile(r"（[^（）\n]*）")                      # 同 pipeline.NOTE
-_XESC = re.compile(r"_x[0-9A-Fa-f]{4}_")                 # 同 pipeline.XESC
+_XESC = re.compile(r"_x[0-9A-Fa-f]{4}_|x005F_")                 # 同 pipeline.XESC
 
 
 def _one_line(s: str) -> str:
@@ -267,8 +267,8 @@ def parse_import(data: bytes) -> dict:
         flatj = json.dumps(clean, ensure_ascii=False)
         m = _XESC.search(flatj) or _XESC.search(_NOTE.sub("", flatj))
         if m:
-            raise ValueError(f"讀圖檔「{str(key)[:40]}」含有「{m.group(0)}」這種字樣（底線、x、四位十六進位、底線），"
-                             "Excel 會把它變成別的字，請改掉後再貼")
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」含有「{m.group(0)}」這種字樣（底線、x、四位十六進位、底線；或 x005F 加底線），"
+                             "寫進 Excel 會變成別的字或消失，請改掉後再貼")
         single = list(clean["fixed"].values()) + [v for k, v in clean.items() if isinstance(v, str) and k != "scene"]
         if any(len(x) > FIELD_MAX for x in single) or len(compose_text(read)) > IMPORT_PHOTO_MAX:
             raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料、項目、位置、人員、日期、建議項目每欄上限 {FIELD_MAX} 字，"

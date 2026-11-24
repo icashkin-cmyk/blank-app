@@ -441,8 +441,8 @@ def page():
             if st.button("重新產出 Excel"):
                 for i, e in enumerate(ents):
                     e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()
-                    e["design"] = [x for x in S[f"e{i}design"].splitlines() if x.strip()]
-                    e["measured"] = [x for x in S[f"e{i}measured"].splitlines() if x.strip()]
+                    e["design"] = [x for x in pl.tidy(S[f"e{i}design"]).splitlines() if x.strip()]   # 先去控制字元再切行（否則 U+2028 等會變成換行）
+                    e["measured"] = [x for x in pl.tidy(S[f"e{i}measured"]).splitlines() if x.strip()]
                 guard(job.save_entries, ents)
                 guard(job.build)
                 guard(job.check_output)
@@ -459,7 +459,7 @@ def page():
                 st.warning("這個環境沒有 LibreOffice，無法轉 PDF。")
             for r in job.log[-2:]:
                 show_result(r)
-        st.caption("下次接續：在第 1 步上傳這次的材料自主檢查照片.xlsx，照片與原文會帶回來；用「修改欄位」改過的內容與選的材料表品項不會帶回，舊照片會回到讀字的內容。")
+        st.caption("下次接續：在第 1 步上傳這次的材料自主檢查照片.xlsx，照片與原文會帶回來；用「修改欄位」改過的內容、確認頁的檢查項目（讀圖建議）與選的材料表品項不會帶回，舊照片會回到讀字的內容。")
         if st.button("結束並刪除暫存，處理下一批"):
             reset(); st.rerun()
 

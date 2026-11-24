@@ -972,3 +972,21 @@ def test_r6_output_scan_and_long_names_and_no_truncation(tmp_path):
     assert "__class__.__name__" not in src
     assert "max_chars=pl.MAX_TEXT" not in src and src.count("max_chars=max(pl.MAX_TEXT, len(") >= 3
     assert "pl.check_name_len(" in src and "job.check_output" in src and "pl.STUCK" in src
+
+
+def test_r7_x005f_and_done_page_ctrl():
+    """稽核 v3 第 7 輪：「x005F_」（前面沒有底線）openpyxl 讀檔時會整段刪掉，要一樣擋下；下載頁「修改欄位」先去控制字元再切行。"""
+    for bad in ("型號x005F_B", "x005F_", "a\x7fx005F_b"):
+        with pytest.raises(pl.PipelineError, match="x005F_"):
+            pl.check_x(bad, "第 1 張")
+        with pytest.raises(ValueError, match="x005F_"):
+            rd.parse_import(json.dumps({"a.jpg": {"item": bad}}).encode())
+    pl.check_x("x005f_ X005F_ 0x005F", "第 1 張")             # 大小寫不同、沒有結尾底線：openpyxl 不動，不擋
+    class N(pl.Job):
+        def __init__(self): pass
+        def manifest(self):
+            return [{"nnn": "001", "原檔名": "ax005F_b.jpg"}]
+    with pytest.raises(pl.PipelineError, match="檔名"):
+        N().check_names()
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'pl.tidy(S[f"e{i}design"]).splitlines()' in src and 'pl.tidy(S[f"e{i}measured"]).splitlines()' in src
