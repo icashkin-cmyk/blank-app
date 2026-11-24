@@ -7,10 +7,11 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
 ## 流程（三步；對應 SKILL.md「二、流程」）
 1. 上傳照片（20 張以內或 zip；可附上次的 xlsx 接續）→ `preflight start`、`restore`、`prep`（SHA-256 去重）→ 自動讀字成草稿。
    - 想要更準（選用，不用金鑰）：第 1 步的折疊區有一段可複製的話（`reader.IMPORT_PROMPT`），把同一批照片和這段話丟給 Claude 等 AI 對話，
-     把回覆的 JSON 貼回來（或上傳 .json）。`reader.parse_import` 檢查格式（只收認得的欄位、型別不對拒收、整份上限 1 MB、每張內容合計上限 4000 字與工程資料每欄 200 字、鍵只取檔名〔/ 與 \ 都切〕），
+     把回覆的 JSON 貼回來（或上傳 .json）。`reader.parse_import` 檢查格式（只收認得的欄位、型別不對拒收、整份上限 1 MB、每張組成草稿後上限 4000 字與工程資料每欄 200 字、單行欄位裡的換行改成空白、含不成對代理字元拒收、鍵只取檔名〔/ 與 \ 都切〕；
+     取 JSON 只用字串切割：整段、``` 程式碼區塊、第一個 { 到最後一個 } 依序試，不用會回溯的正規表示式），
      `ImportedReader` 依原檔名或 SHA-256 對到照片當草稿；沒對到的照片用本機 OCR，並在該張標明。內容只當成抄寫文字，仍要在確認頁看過。
      照片是使用者自己交給 AI 對話的（折疊區有提醒先確認可以外傳），網頁本身不送外部服務。
-     外來文字（讀圖檔、自動讀到的字、檔名）顯示在提示訊息前一律經 `pipeline.plain` 跳脫，只顯示成字，不會變成圖片、連結或粗體。
+     含外來文字（讀圖檔、自動讀到的字、檔名）的提示訊息一律用 `app.say`（`html.escape` 後以 `st.html` 顯示，不經 Markdown），只顯示成字，不會變成圖片、連結、粗體或表情符號。
      測試工具（Playwright）用含中文的磁碟路徑選檔會失敗；網頁本身收得下中文檔名（獨立稽核以記憶體內容上傳驗證）。
 2. 確認內容（一頁）：
    - 工程資料（工程名稱、監造單位、承造單位）整批確認一次：預設取各張讀到的多數寫法，沒讀清楚（含〔?〕）的寫法不當預設；
@@ -27,7 +28,7 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
    - 按「產出 Excel」：`addmany` → `base --all` → `make_entries` → `build_company` → 公式改回文字 → `preflight deliver`
      （照片或使用者的字以「=」開頭時，`build_company.py` 會寫成 Excel 公式；網頁在產出後把所有公式格改回文字、字不動。公司範本的產出檔本來沒有公式。）
      （印 FAIL 也回 0 的既有缺陷由本模組攔下）。有照片寫不進去時說明原因、留在這一頁。
-   - 每張文字框上限 4000 字（`pipeline.MAX_TEXT`）。
+   - 每張文字框上限 4000 字（`pipeline.MAX_TEXT`）；自動讀字的草稿本身超過時，上限放寬到草稿長度。寫檔前另有一道 30000 字的檢查（`pipeline.CELL_MAX`，Excel 一格上限 32767 字），超過就不產出並說明是第幾張。
    - 材料表品項（選用）：每張照片可從 Skill 內建材料表（`forms.csv`）選一個品項，比較像這張讀到的字的排前面。選了以後檢查項目用材料表的
      材料/設備名稱、設計/標準值用「工作表名稱＋品質管理標準」（與 `make_entries` 對到材料表時的寫法相同）；勾「實測值與材料表相符」時實測值同寫，
      原本只在實測欄的內容（白板實測、量測讀數）接在後面不覆蓋。
@@ -94,7 +95,7 @@ icashkin-cmyk/miko 固定 commit（`pipeline.SKILL_COMMIT`）下載，不在本 
    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
    ```
    金鑰與上列密鑰只填在平台的 Secrets，不寫進 repo。
-4. 關掉工具列與錯誤細節：Streamlit Community Cloud 沒有設定畫面，要在 repo 根目錄加 `.streamlit/config.toml`，內容是 `[client]` 區段的 `toolbarMode = "viewer"` 與 `showErrorDetails = "none"`（`false` 仍會顯示堆疊）。這個檔會同時影響同一個 repo 的其他 Streamlit 頁面，所以本 repo 目前沒有加，由部署的人決定。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
+4. 關掉工具列與錯誤細節：Streamlit Community Cloud 沒有設定畫面，要在 repo 根目錄加 `.streamlit/config.toml`，內容是 `[client]` 區段的 `toolbarMode = "viewer"` 與 `showErrorDetails = "none"`（`false` 仍會顯示堆疊）。本 repo 根目錄的 `.streamlit/config.toml` 目前只有 `[browser]` 的 `gatherUsageStats = false`（關掉 Streamlit 使用統計，瀏覽器才不會連到 Streamlit 的統計主機）；`[client]` 這兩項會同時影響同一個 repo 的其他 Streamlit 頁面，所以沒有加，由部署的人決定。Streamlit 只讀「啟動時所在目錄」的 `.streamlit/`：要從 repo 根目錄啟動，從別的目錄啟動時使用統計不會關。程式啟動時也會把錯誤細節設成 `none`，頁面主體另外包了一層攔截，未預期的錯誤只顯示一般訊息。
 
 ## 執行與測試
 ```

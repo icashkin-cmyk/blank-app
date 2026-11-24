@@ -782,25 +782,57 @@ def test_reading_text_pasted_with_code_fence():
     assert list(d) == ["img_1.jpeg"] and d["img_1.jpeg"].item == "EMT管材料進場"
 
 
-def test_plain_escapes_markdown():
-    """稽核 v3 第 1 輪 M1：外來文字（匯入的讀圖檔、OCR、檔名）放進提示訊息前要先跳脫，不能變成圖片、連結、粗體。"""
-    s = pl.plain("![p](http://t.example.invalid/a.png) **粗** [點我](http://e.example.invalid) www.e.example.invalid :red[x] $a$ <b>\n第二行")
-    for bad in ("![", "](", "**", "http:", "www.", ":red[", "$a$", "<b>", "\n"):
-        assert bad not in s
-    assert pl.plain("電線｜PVC 2.0mm〔?〕") == "電線｜PVC 2\\.0mm〔\\?〕"
-    assert pl.plain(None) == ""
-    import re as _re                                      # Markdown 自動連結的三種字樣（網址、www.、email）都要被零寬空白拆開
-    t = pl.plain("http://e.example.invalid HTTPS://E.example.invalid www.e.example.invalid a@e.example.invalid").replace("\\", "")
-    assert not _re.search(r"(?i)https?://|www\.|[-.\w+]@[-\w]", t)
-
-
-def test_app_shows_untrusted_text_through_plain():
-    """app.py 裡含外來文字的提示一律經過 pl.plain（逐處列出，少一處就失敗）。"""
+def test_app_shows_untrusted_text_as_plain_html():
+    """稽核 v3 第 1、2 輪：含外來文字（讀圖檔、自動讀到的字、檔名）的提示一律走 say()（html.escape 後用 st.html 顯示，不經 Markdown），
+    不會變成圖片、連結、粗體、表情符號或被改寫箭頭。逐處列出，少一處就失敗；也不准再把這些變數放進 st.error／st.caption。"""
+    import re as _re
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    for needle in ('st.error(pl.plain(str(e)))', 'st.error(pl.plain(S.pop("upload_err")))', 'st.error(pl.plain(S.pop("review_err")))',
-                   'st.caption(pl.plain(r["原檔名"]))', 'st.caption("⚠ " + pl.plain(w))', '{pl.plain(v)}」{n} 張', '{f}是「{pl.plain(v)}」',
-                   "pl.plain(S.add_note.removeprefix('OK '))"):
+    assert "html.escape(" in src and "st.html(" in src
+    for needle in ('say("error", str(e))', 'say("error", S.pop("upload_err"))', 'say("error", S.pop("review_err"))',
+                   'say("caption", r["原檔名"])', 'say("caption", "⚠ " + w)', 'say("caption", "各張讀到的寫法不同：', 'say("error", "這一張讀到的',
+                   'say("caption", f"讀字方式：'):
         assert needle in src, needle
+    for ln in src.splitlines():
+        if _re.search(r"st\.(error|caption|warning|info|markdown|write|success)\(", ln):
+            assert not _re.search(r"str\(e\)|upload_err|review_err|原檔名|add_note|\bw\b\)|odd\[nnn\]|opts\[f\]", ln), ln
+
+
+def test_parse_import_no_quadratic_regex():
+    """稽核 v3 第 2 輪 M1：1 MB 的「```{」重複不能讓伺服器卡住（原本的正規表示式是平方級回溯，卡 66 秒）。"""
+    import time
+    t = time.time()
+    with pytest.raises(ValueError):
+        rd.parse_import(("```{" * 250_000).encode())
+    with pytest.raises(ValueError):
+        rd.parse_import(("```json\n{" * 100_000 + "}```" * 100_000).encode())
+    assert time.time() - t < 5
+
+
+def test_parse_import_fence_variants():
+    body = json.dumps({"a.jpg": {"lines": ["甲｜1"]}}, ensure_ascii=False)
+    for text in ("說明\n```json\n" + body + "\n```\n結尾", "```JSON\n" + body + "\n```", "```python\nx=1\n```\n```json\n" + body + "\n```\n```\n其他\n```",
+                 "以下是結果：\n" + body + "\n請確認", body):
+        assert list(rd.parse_import(text.encode())) == ["a.jpg"], text[:30]
+
+
+def test_parse_import_composed_length_and_surrogate_and_newline():
+    """稽核 v3 第 2 輪 M2～M4：上限要算到組成草稿後的長度；孤立代理字元在匯入時就拒收；單行欄位裡的換行改成空白（寫入與畫面一致）。"""
+    with pytest.raises(ValueError, match="太長"):
+        rd.parse_import(json.dumps({"p1.jpg": {"lines": ["甲｜1"], "readings": ["a"] * 3990, "item": "X"}}).encode())
+    big = rd.parse_import(json.dumps({"p1.jpg": {"lines": ["字" * 40] * 60, "readings": ["1"] * 100}}).encode())["p1.jpg"]
+    assert len(rd.compose_text(big)) < 2 * pl.MAX_TEXT
+    for bad in ('{"p1.jpg":{"lines":["甲\\ud800乙｜1"]}}', '{"p\\ud800.jpg":{"lines":["甲"]}}', '{"p1.jpg":{"fixed":{"工程名稱":"甲\\udfff"}}}'):
+        with pytest.raises(ValueError, match="字元"):
+            rd.parse_import(bad.encode())
+    d = rd.parse_import(json.dumps({"p1.jpg": {"fixed": {"工程名稱": "甲新建工程\n監造單位：乙事務所\r\n承造單位：丙"}, "item": "A\nB", "lines": ["x\ny"]}}).encode())["p1.jpg"]
+    assert d.fixed["工程名稱"] == "甲新建工程 監造單位：乙事務所 承造單位：丙" and d.item == "A B" and d.lines == ["x y"]
+
+
+def test_write_text_fixed_newline_cannot_inject(job_with_photo=None):
+    """M4 根因：fixed 的值帶換行時不能變成另一個欄位。"""
+    assert pl.one_line("甲\n監造單位：乙\u2028丙\t丁") == "甲 監造單位：乙 丙 丁"
+    src = Path(pl.__file__).read_text(encoding="utf-8")
+    assert "one_line(CTRL.sub" in src
 
 
 def test_parse_import_limits_length_and_windows_path():

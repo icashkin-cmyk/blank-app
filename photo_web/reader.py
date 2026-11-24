@@ -184,19 +184,51 @@ kind 只能是 """ + "、".join(KINDS) + """ 其中一個；fixed 是 {"工程�
 我會把你輸出的 JSON 貼到網頁，和照片一起上傳。"""
 
 
+def _one_line(s: str) -> str:
+    return " ".join(s.split())                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
+
+
+def _find_json(text: str):
+    """從貼上的整段文字取出 JSON 物件：先整段讀；不行就看 ``` 程式碼區塊（最多試 20 個）；再不行取第一個 { 到最後一個 }。
+    只用字串切割，不用會回溯的正規表示式（稽核 v3 第 2 輪：1 MB 的特製內容曾讓伺服器卡 66 秒）。"""
+    cands = [text]
+    parts = text.split("```", 41)
+    for blk in parts[1:41:2]:
+        blk = blk.strip()
+        if blk[:4].lower() == "json":
+            blk = blk[4:].strip()
+        if blk.startswith("{"):
+            cands.append(blk)
+    a, b = text.find("{"), text.rfind("}")
+    if 0 <= a < b:
+        cands.append(text[a:b + 1])
+    for c in cands:
+        try:
+            obj = json.loads(c)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj
+        if c is text:
+            return obj                                     # 整段是合法 JSON 但不是物件：交給下面說明
+    raise ValueError
+
+
 def parse_import(data: bytes) -> dict:
     """使用者上傳的讀圖檔（AI 在對話裡看圖抄好的 JSON：{原檔名或 SHA-256: PhotoRead 欄位}）→ {鍵（小寫）: PhotoRead}。
     只收認得的欄位、型別不對就拒收並說明第幾筆；不執行、不解讀檔內任何指示（內容只當成抄寫文字，仍要使用者在確認頁看過）。"""
     if len(data) > IMPORT_MAX:
         raise ValueError("讀圖檔太大（上限 1 MB）")
     try:
-        text = data.decode("utf-8-sig").strip()
-        m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)      # 直接貼 AI 的回覆：只取程式碼區塊裡的 JSON
-        obj = json.loads(m.group(1) if m else text)
+        obj = _find_json(data.decode("utf-8-sig").strip())
     except Exception:
         raise ValueError("讀圖檔不是可以讀的 JSON（請整段複製 AI 回覆的程式碼區塊內容）") from None
     if not isinstance(obj, dict) or not obj:
         raise ValueError("讀圖檔的最外層要是「檔名 → 內容」的物件，而且至少一筆")
+    try:
+        json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        raise ValueError("讀圖檔裡有無法顯示的字元（不成對的代理字元），請 AI 重新輸出一次") from None
     out = {}
     for key, d in obj.items():
         if not isinstance(d, dict):
@@ -207,19 +239,23 @@ def parse_import(data: bytes) -> dict:
             if k == "fixed":
                 if not isinstance(v, dict) or not all(isinstance(x, str) for x in v.values()):
                     raise ValueError(f"讀圖檔「{str(key)[:40]}」的 fixed 要是三個文字欄位")
-                v = {f: v.get(f, "") for f in ("工程名稱", "監造單位", "承造單位")}
+                v = {f: _one_line(v.get(f, "")) for f in ("工程名稱", "監造單位", "承造單位")}
             elif k in ("lines", "readings"):
                 if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
                     raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字陣列")
+                v = [_one_line(x) for x in v]
             elif not isinstance(v, str):
                 raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字")
+            else:
+                v = _one_line(v)
             clean[k] = v
-        if any(len(x) > 200 for x in clean["fixed"].values()) or sum(
-                len(x) for k, v in clean.items() if k != "fixed" for x in (v if isinstance(v, list) else [v])) > IMPORT_PHOTO_MAX:
-            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料每欄上限 200 字、其餘合計上限 {IMPORT_PHOTO_MAX} 字）")
         if clean["kind"] not in KINDS:
             clean["kind"] = "其他"
-        out[re.split(r"[\\/]", str(key))[-1].strip().lower()] = PhotoRead.from_dict(clean)
+        read = PhotoRead.from_dict(clean)
+        # 上限算「組成草稿後」的長度（每筆讀數、每個欄位組成草稿時會多出標籤字），不是原始字數
+        if any(len(x) > 200 for x in clean["fixed"].values()) or len(compose_text(read)) > IMPORT_PHOTO_MAX:
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料每欄上限 200 字、組成草稿後上限 {IMPORT_PHOTO_MAX} 字）")
+        out[re.split(r"[\\/]", str(key))[-1].strip().lower()] = read
     return out
 
 

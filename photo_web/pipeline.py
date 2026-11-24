@@ -46,16 +46,12 @@ MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低�
 SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
 CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
-_MD = re.compile(r"([!-/:-@\[-`{-~])")
+CELL_MAX = 30000                     # 寫檔前的最後一道：Excel 一格上限 32767 字
 
 
-def plain(s) -> str:
-    """外來文字（匯入的讀圖檔、自動讀到的字、檔名）放進 Streamlit 提示訊息前先跳脫：
-    所有 ASCII 標點前加反斜線、換行改空白，讓它只顯示成字，不會變成圖片（瀏覽器對外連線）、連結或粗體。
-    網址、www.、email 另外插入看不見的零寬空白（U+200B）：Markdown 會把這三種字樣自動變成可點的連結，跳脫擋不住。只影響畫面提示，不影響寫入 Excel 的字。"""
-    s = re.sub(r"\s+", " ", str(s or ""))
-    s = re.sub(r"(?i)(https?:)(?=//)|(www)(?=\.)", lambda m: m.group(0) + "\u200b", s).replace("@", "\u200b@")
-    return _MD.sub(r"\\\1", s)
+def one_line(s) -> str:
+    """單行欄位：換行、定位、U+2028 等空白一律變一個空白。"""
+    return " ".join(str(s or "").split())
 
 
 
@@ -506,10 +502,12 @@ class Job:
         row = next((r for r in self.manifest() if r["nnn"] == nnn), None)
         if row is None:
             raise PipelineError(f"manifest 沒有第 {nnn} 張")
+        if len(body) > CELL_MAX:
+            raise PipelineError(f"第 {int(nnn)} 張的內容有 {len(body)} 字，超過 {CELL_MAX} 字（Excel 一格放不下），請刪減後再產出。")
         path = self.p("text", f"{nnn}.txt")
         open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{CTRL.sub('', body).strip()}\n")
         given = fixed is not None
-        fixed = {k: CTRL.sub("", v).strip() for k, v in (fixed or {}).items() if v and CTRL.sub("", v).strip()}
+        fixed = {k: one_line(CTRL.sub("", v)) for k, v in (fixed or {}).items() if v and one_line(CTRL.sub("", v))}   # 值不得帶換行（否則會變成另一個欄位）
         fpath = self.p("fixed", f"{nnn}.txt")
         if fixed:
             os.makedirs(self.p("fixed"), exist_ok=True)
