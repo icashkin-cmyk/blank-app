@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
@@ -779,3 +780,40 @@ def test_reading_text_pasted_with_code_fence():
     body = json.dumps({"IMG_1.jpeg": _read_json()}, ensure_ascii=False)
     d = rd.parse_import(("好的，以下是結果：\n```json\n" + body + "\n```\n請確認。").encode("utf-8"))
     assert list(d) == ["img_1.jpeg"] and d["img_1.jpeg"].item == "EMT管材料進場"
+
+
+def test_plain_escapes_markdown():
+    """稽核 v3 第 1 輪 M1：外來文字（匯入的讀圖檔、OCR、檔名）放進提示訊息前要先跳脫，不能變成圖片、連結、粗體。"""
+    s = pl.plain("![p](http://t.example.invalid/a.png) **粗** [點我](http://e.example.invalid) www.e.example.invalid :red[x] $a$ <b>\n第二行")
+    for bad in ("![", "](", "**", "http:", "www.", ":red[", "$a$", "<b>", "\n"):
+        assert bad not in s
+    assert pl.plain("電線｜PVC 2.0mm〔?〕") == "電線｜PVC 2\\.0mm〔\\?〕"
+    assert pl.plain(None) == ""
+    import re as _re                                      # Markdown 自動連結的三種字樣（網址、www.、email）都要被零寬空白拆開
+    t = pl.plain("http://e.example.invalid HTTPS://E.example.invalid www.e.example.invalid a@e.example.invalid").replace("\\", "")
+    assert not _re.search(r"(?i)https?://|www\.|[-.\w+]@[-\w]", t)
+
+
+def test_app_shows_untrusted_text_through_plain():
+    """app.py 裡含外來文字的提示一律經過 pl.plain（逐處列出，少一處就失敗）。"""
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    for needle in ('st.error(pl.plain(str(e)))', 'st.error(pl.plain(S.pop("upload_err")))', 'st.error(pl.plain(S.pop("review_err")))',
+                   'st.caption(pl.plain(r["原檔名"]))', 'st.caption("⚠ " + pl.plain(w))', '{pl.plain(v)}」{n} 張', '{f}是「{pl.plain(v)}」',
+                   "pl.plain(S.add_note.removeprefix('OK '))"):
+        assert needle in src, needle
+
+
+def test_parse_import_limits_length_and_windows_path():
+    """稽核 v3 第 1 輪 S1、S6：每張內容總長有上限（不會寫出超過 Excel 一格上限的字）；鍵是 Windows 路徑也只取檔名。"""
+    with pytest.raises(ValueError, match="太長"):
+        rd.parse_import(json.dumps({"a.jpg": {"lines": ["字" * (pl.MAX_TEXT + 1)]}}).encode())
+    with pytest.raises(ValueError, match="太長"):
+        rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": "字" * 201}}}).encode())
+    d = rd.parse_import(json.dumps({"C:\\x\\y\\IMG_1.JPG": {"lines": ["甲｜1"]}}).encode())
+    assert list(d) == ["img_1.jpg"]
+
+
+def test_imported_reader_missed_no_duplicates():
+    r = rd.ImportedReader({}, fallback=None)
+    r.read("x", "0" * 64, "b.jpg"); r.read("x", "0" * 64, "b.jpg")
+    assert r.missed == ["b.jpg"]

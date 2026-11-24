@@ -175,6 +175,7 @@ class FixtureReader:
         return PhotoRead.from_dict(d) if d else None
 
 
+IMPORT_PHOTO_MAX = 4000                  # 每張照片匯入內容的字數上限（同 pipeline.MAX_TEXT；Excel 一格上限 32767 字）
 IMPORT_MAX = 1_000_000                                   # 讀圖檔上限（位元組）
 IMPORT_PROMPT = PROMPT.replace("只看這一張照片，輸出 JSON（欄位定義如下）。",
                                "我會給你幾張照片。每一張都單獨看、單獨抄，不得把別張的字帶進來。") + """
@@ -213,9 +214,12 @@ def parse_import(data: bytes) -> dict:
             elif not isinstance(v, str):
                 raise ValueError(f"讀圖檔「{str(key)[:40]}」的 {k} 要是文字")
             clean[k] = v
+        if any(len(x) > 200 for x in clean["fixed"].values()) or sum(
+                len(x) for k, v in clean.items() if k != "fixed" for x in (v if isinstance(v, list) else [v])) > IMPORT_PHOTO_MAX:
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料每欄上限 200 字、其餘合計上限 {IMPORT_PHOTO_MAX} 字）")
         if clean["kind"] not in KINDS:
             clean["kind"] = "其他"
-        out[os.path.basename(str(key)).strip().lower()] = PhotoRead.from_dict(clean)
+        out[re.split(r"[\\/]", str(key))[-1].strip().lower()] = PhotoRead.from_dict(clean)
     return out
 
 
@@ -233,7 +237,8 @@ class ImportedReader:
         got = self.data.get(sha256.lower()) or self.data.get(os.path.basename(original_name).strip().lower())
         if got is not None:
             return got
-        self.missed.append(original_name)
+        if original_name not in self.missed:
+            self.missed.append(original_name)
         return self.fallback.read(image_path, sha256, original_name) if self.fallback else None
 
 

@@ -46,6 +46,18 @@ MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低�
 SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
 CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
+_MD = re.compile(r"([!-/:-@\[-`{-~])")
+
+
+def plain(s) -> str:
+    """外來文字（匯入的讀圖檔、自動讀到的字、檔名）放進 Streamlit 提示訊息前先跳脫：
+    所有 ASCII 標點前加反斜線、換行改空白，讓它只顯示成字，不會變成圖片（瀏覽器對外連線）、連結或粗體。
+    網址、www.、email 另外插入看不見的零寬空白（U+200B）：Markdown 會把這三種字樣自動變成可點的連結，跳脫擋不住。只影響畫面提示，不影響寫入 Excel 的字。"""
+    s = re.sub(r"\s+", " ", str(s or ""))
+    s = re.sub(r"(?i)(https?:)(?=//)|(www)(?=\.)", lambda m: m.group(0) + "\u200b", s).replace("@", "\u200b@")
+    return _MD.sub(r"\\\1", s)
+
+
 
 
 def skill_source() -> str:

@@ -72,7 +72,7 @@ def guard(fn, *a, **k):
     try:
         return fn(*a, **k)
     except pl.PipelineError as e:
-        st.error(str(e))
+        st.error(pl.plain(str(e)))
         if e.result:
             show_result(e.result)
         st.stop()
@@ -184,13 +184,14 @@ def page():
         with st.expander("想要更準：用 AI 對話看圖，把結果貼進來（選用，不用金鑰）"):
             st.markdown("手寫字用自動讀字只有五成左右。做法：把同一批照片丟給 Claude 等 AI 對話，貼上下面第 1 格的那段話；"
                         "再把 AI 回覆的 JSON 整段貼到第 2 格（或存成 .json 檔上傳）。網頁就用它當草稿，裡面沒有的照片仍用自動讀字。"
-                        "草稿一樣要你在下一步對照照片看過才寫入。")
+                        "草稿一樣要你在下一步對照照片看過才寫入。"
+                        "注意：照片是你自己交給那個 AI 服務的，會離開這台電腦，請先確認這批照片可以外傳；這個網頁本身不會送出照片。")
             st.caption("1. 複製這段話給 AI（右上角有複製鈕）")
             st.code(rd.IMPORT_PROMPT, language=None)
             readtext = st.text_area("2. 貼上 AI 回覆的 JSON", height=140, max_chars=rd.IMPORT_MAX, key="readtext")
-            readfile = st.file_uploader("或上傳 .json 檔（檔名請用英數字）", type=["json"])
+            readfile = st.file_uploader("或上傳 .json 檔", type=["json"])
         if S.get("upload_err"):
-            st.error(S.pop("upload_err"))
+            st.error(pl.plain(S.pop("upload_err")))
         go = S.pop("go", False)
         # 按下後這一輪按鈕就變成不能按，處理中不能再按第二次（第四輪稽核：連按會重複預扣）
         st.button("開始", type="primary", disabled=(not photos) or go, on_click=lambda: S.update(go=True))
@@ -249,9 +250,9 @@ def page():
                     "每張的前兩行「查驗時間：」「照片日期：」要留著。看過後逐張打勾，或用「全選」。")
         else:
             st.info("只寫照片上看得到的字；看不清寫〔?〕。前兩行必須是「查驗時間：」「照片日期：」。每張看過後打勾，或用「全選」。")
-        st.caption(f"讀字方式：{how}" + (f"｜收件：{S.add_note.removeprefix('OK ')}" if S.get("add_note") else ""))
+        st.caption(f"讀字方式：{how}" + (f"｜收件：{pl.plain(S.add_note.removeprefix('OK '))}" if S.get("add_note") else ""))
         if S.get("review_err"):
-            st.error(S.pop("review_err"))
+            st.error(pl.plain(S.pop("review_err")))
         if todo:
             # 固定欄位：整批共用，預設取各張讀到的多數寫法；使用者在這裡確認一次（各張寫法不同時不再逐張擋下）
             st.subheader("工程資料（整批共用，確認一次）")
@@ -270,7 +271,7 @@ def page():
                     if not opts[f]:
                         st.caption("照片上沒讀到這一欄；知道的話可以自己填（會記在這一批），不知道就留空。")
                     elif len(opts[f]) > 1:
-                        st.caption("各張讀到的寫法不同：" + "；".join(f"「{v}」{n} 張" for v, n in opts[f][:4])
+                        st.caption("各張讀到的寫法不同：" + "；".join(f"「{pl.plain(v)}」{n} 張" for v, n in opts[f][:4])
                                    + ("…" if len(opts[f]) > 4 else "") + "。請對照照片確認上面這一個。")
                     else:
                         st.caption("自動讀到的字可能有錯，請對照照片。")
@@ -307,15 +308,15 @@ def page():
             for r in todo:
                 nnn = r["nnn"]
                 st.markdown(f"**第 {int(nnn)} 張**")
-                st.caption(r["原檔名"])
+                st.caption(pl.plain(r["原檔名"]))
                 c1, c2 = st.columns([3, 2])
                 with c1:
                     st.image(job.p("photos", f"{nnn}_grid.jpg"), width="stretch")
                 with c2:
                     for w in S.notes.get(r["原檔名"], []):
-                        st.caption("⚠ " + w)
+                        st.caption("⚠ " + pl.plain(w))
                     if nnn in odd:
-                        st.error("這一張讀到的" + "、".join(f"{f}是「{v}」" for f, v in odd[nnn])
+                        st.error("這一張讀到的" + "、".join(f"{f}是「{pl.plain(v)}」" for f, v in odd[nnn])
                                  + "，和上面確認的不一樣。產出時這一張會記成上面的工程資料。")
                         st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}v{S.get('fxver', 0)}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
@@ -374,7 +375,7 @@ def page():
         if n_item: todo_notes.append(f"檢查項目未填：{n_item} 筆")
         if n_q: todo_notes.append(f"待確認的字〔?〕：{n_q} 處（Excel 內以〔?1〕〔?2〕這樣的編號標出）")
         if S.get("how", "").startswith(("自動讀字", "匯入的讀圖檔")):
-            todo_notes.append("內容是自動讀字的草稿加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
+            todo_notes.append("內容是讀字草稿（自動讀字或匯入的讀圖檔）加上你的確認：沒標〔?〕的字也可能讀錯，交出去前請再對一次照片")
         n_long = len({ln.split("筆", 1)[0] for r in job.log[-2:] for ln in r.stdout.splitlines() if ln.startswith("【超出格子】")})
         if n_long: todo_notes.append(f"內容較長：{n_long} 筆已加高列高完整顯示（沒有截行、沒有縮字），列印前請看一下版面")
         st.download_button("下載 材料自主檢查照片.xlsx", job.output_bytes(), file_name=pl.OUTPUT, type="primary",
@@ -422,7 +423,7 @@ def page():
 try:
     page()
 except pl.PipelineError as e:
-    st.error(str(e))
+    st.error(pl.plain(str(e)))
 except Exception as e:  # 未預期的錯誤：不顯示路徑與堆疊（st.stop／st.rerun 不是 Exception，不會被攔）
     logging.exception("photo_web 未預期的錯誤")
     if S.stage == "upload":                               # 清掉半成品、退回預扣，重跑頁面讓「開始」可以再按（第五輪稽核建議）
