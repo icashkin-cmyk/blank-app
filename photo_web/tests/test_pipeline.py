@@ -990,3 +990,18 @@ def test_r7_x005f_and_done_page_ctrl():
         N().check_names()
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
     assert 'pl.tidy(S[f"e{i}design"]).splitlines()' in src and 'pl.tidy(S[f"e{i}measured"]).splitlines()' in src
+
+
+def test_r8_question_total_precheck_and_import_keeps_spaces():
+    """稽核 v3 第 8 輪：〔?〕自動編號會超過 999 的情況在寫入前就擋下，訊息講實際原因；匯入時中間的空白（連續、全形、NBSP）原樣。"""
+    pl.check_q_total(["甲〔?〕乙〔?12〕", "〔?〕" * 900])
+    for texts in (["〔?〕" * 1000], ["甲〔?999〕乙〔?〕"], ["〔?٣٣٣٣٣〕〔?〕"], ["〔?〕" * 500, "〔?〕" * 500]):
+        with pytest.raises(pl.PipelineError, match="999"):
+            pl.check_q_total(texts)
+    d = rd.parse_import(json.dumps({"a.jpg": {"fixed": {"工程名稱": " 甲　乙  工程 "}, "inspector": "林　明", "item": "品 名",
+                                              "lines": ["A  B　C\tD"], "suggest_item": "建  議　項"}}, ensure_ascii=False).encode())["a.jpg"]
+    assert (d.fixed["工程名稱"], d.inspector, d.item, d.lines, d.suggest_item) == ("甲　乙  工程", "林　明", "品 名", ["A  B　C D"], "建  議　項")
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "pl.check_q_total(" in src
+    with pytest.raises(ValueError, match="太多"):
+        rd.parse_import(json.dumps({f"{i}.jpg": {} for i in range(201)}).encode())

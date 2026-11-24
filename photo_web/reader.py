@@ -176,6 +176,7 @@ class FixtureReader:
 
 
 IMPORT_PHOTO_MAX = 4000                  # 每張照片匯入內容的字數上限（同 pipeline.MAX_TEXT；Excel 一格上限 32767 字）
+IMPORT_ITEMS_MAX = 200                   # 讀圖檔筆數上限（一批照片最多 20 張；留給重複貼上的餘裕）
 IMPORT_MAX = 1_000_000                                   # 讀圖檔上限（位元組）
 IMPORT_PROMPT = PROMPT.replace("只看這一張照片，輸出 JSON（欄位定義如下）。",
                                "我會給你幾張照片。每一張都單獨看、單獨抄，不得把別張的字帶進來。") + """
@@ -188,13 +189,14 @@ _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029\ufffe\uffff
 FIELD_MAX = 200                                          # 單行欄位（工程資料、項目、位置、人員、日期、建議項目…）每欄上限
 
 
-_QBIG = re.compile(r"〔\?[0-9０-９]{4,}〕")                # 待確認編號太大：拒收並說明（不靜默改）
+_QBIG = re.compile(r"〔\?\d{4,}〕")                # 待確認編號太大：拒收並說明（不靜默改）
 _NOTE = re.compile(r"（[^（）\n]*）")                      # 同 pipeline.NOTE
 _XESC = re.compile(r"_x[0-9A-Fa-f]{4}_|x005F_")                 # 同 pipeline.XESC
 
 
 def _one_line(s: str) -> str:
-    return _CTRL.sub("", " ".join(s.split()))             # 先把各種換行、定位、連續空白變一個空白，再去掉控制字元                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
+    # 換行、定位變一個空白，去掉控制字元與頭尾空白；中間的空白（連續、全形、NBSP）原樣（同 pipeline.flat；稽核 v3 第 8 輪）
+    return _CTRL.sub("", re.sub(r"\r\n|[\r\n\t\x0b\x0c\x85\u2028\u2029]", " ", s)).strip()                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
 
 
 def _find_json(text: str):
@@ -234,6 +236,8 @@ def parse_import(data: bytes) -> dict:
         raise ValueError("讀圖檔不是可以讀的 JSON（請整段複製 AI 回覆的程式碼區塊內容）") from None
     if not isinstance(obj, dict) or not obj:
         raise ValueError("讀圖檔的最外層要是「檔名 → 內容」的物件，而且至少一筆")
+    if len(obj) > IMPORT_ITEMS_MAX:
+        raise ValueError(f"讀圖檔有 {len(obj)} 筆，太多了（一次最多 {IMPORT_ITEMS_MAX} 筆；一批照片最多 20 張），請只貼這一批照片的結果")
     try:
         json.dumps(obj, ensure_ascii=False).encode("utf-8")
     except Exception:
@@ -263,7 +267,7 @@ def parse_import(data: bytes) -> dict:
         read = PhotoRead.from_dict(clean)
         # 上限算「組成草稿後」的長度（每筆讀數、每個欄位組成草稿時會多出標籤字），不是原始字數
         if _QBIG.search(json.dumps(clean, ensure_ascii=False)):
-            raise ValueError(f"讀圖檔「{str(key)[:40]}」的待確認編號太大（〔?N〕的 N 最多 3 位數），請改成〔?〕後再貼")
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」的待確認編號超過 999（〔?N〕的 N 最多 3 位數），請改成〔?〕後再貼")
         flatj = json.dumps(clean, ensure_ascii=False)
         m = _XESC.search(flatj) or _XESC.search(_NOTE.sub("", flatj))
         if m:

@@ -75,9 +75,19 @@ def check_x(s, where: str) -> None:
     m = XESC.search(t) or XESC.search(NOTE.sub("", t))
     if m:
         raise PipelineError(f"{where}" + X_WHY.format(m=m.group(0)))
-    q = re.search(r"〔\?[0-9０-９]{4,}〕", t)
+    q = re.search(r"〔\?\d{4,}〕", t)
     if q:
-        raise PipelineError(f"{where}的待確認編號「{q.group(0)[:12]}{'…' if len(q.group(0)) > 12 else ''}」太大（最多 3 位數），請改成〔?〕，編號會在產出時自動排。")
+        raise PipelineError(f"{where}的待確認編號「{q.group(0)[:12]}{'…' if len(q.group(0)) > 12 else ''}」超過 999："
+                            "沒編號的〔?〕會在產出時從最大的編號往下自動排，請把大的編號改成〔?〕，或減少〔?〕的數量。")
+
+
+def check_q_total(texts) -> None:
+    """寫入前先算：這一批最大的〔?N〕加上沒編號的〔?〕個數超過 999，產出時自動編號就會超過 3 位數（稽核 v3 第 8 輪：原本寫入後才擋）。"""
+    nums = [int(n) for t in texts for n in re.findall(r"〔\?(\d+)〕", CTRL.sub("", str(t or "")))]
+    blank = sum(CTRL.sub("", str(t or "")).count("〔?〕") for t in texts)
+    if max(nums, default=0) + blank > 999:
+        raise PipelineError(f"這一批待確認的〔?〕太多：最大編號 {max(nums, default=0)} 加上沒編號的 {blank} 個會超過 999（產出時自動編號最多 3 位數）。"
+                            "請把大的編號改成〔?〕，或減少〔?〕的數量（例如分批上傳）。")
 
 
 def check_name_len(name: str) -> None:

@@ -373,6 +373,10 @@ def page():
                         pl.check_x(v, f"第 {int(nnn)} 張的{what}")
                     except pl.PipelineError as e:
                         bad.append(str(e))
+            try:
+                pl.check_q_total([S[f"t{r['nnn']}"] for r in todo])
+            except pl.PipelineError as e:
+                bad.append(str(e))
             if bad:
                 say("error", "；".join(dict.fromkeys(bad))); st.stop()
             for r in todo:
