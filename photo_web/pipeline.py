@@ -49,6 +49,22 @@ MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一�
 CELL_MAX = 30000                     # 寫檔前的最後一道：Excel 一格上限 32767 字
 
 
+QBIG = re.compile(r"〔\?\d{4,}〕")        # 〔?N〕的 N 超過 3 位數：改回〔?〕（Skill 會從最大編號往下編，N 很長時每個〔?〕都變成幾千位數）
+XESC = re.compile(r"_x[0-9A-Fa-f]{4}_")  # Excel 檔案格式會把「_x0041_」解碼成別的字（A、換行、控制字元），寫進去和畫面看到的會不同
+X_WHY = "含有「{m}」這種字樣（底線、x、四位十六進位、底線），Excel 會把它變成別的字，請改掉其中一個底線或刪掉後再試"
+
+
+def tidy(s: str) -> str:
+    """寫檔前的整理：去掉控制字元、過長的〔?N〕改回〔?〕。"""
+    return QBIG.sub("〔?〕", CTRL.sub("", s))
+
+
+def check_x(s, where: str) -> None:
+    m = XESC.search(str(s or ""))
+    if m:
+        raise PipelineError(f"{where}" + X_WHY.format(m=m.group(0)))
+
+
 def one_line(s) -> str:
     """單行欄位：換行、定位、U+2028 等空白一律變一個空白。"""
     return " ".join(str(s or "").split())
@@ -334,6 +350,8 @@ class Job:
         self.scripts = os.path.join(self.dir, "scripts")
         self.log: list[StepResult] = []
         self.reads: dict[str, rd.PhotoRead] = {}   # sha256 → 讀圖結果（建議欄位用）
+        self.confirmed_sug: dict[str, str] = {}      # nnn → 使用者在確認頁確認過的建議檢查項目（按產出當下記下，重試不會掉）
+        self.chosen_forms: dict[str, tuple] = {}     # nnn →（材料表品項編號, 實測值是否同材料表）
         try:
             if scripts_src:  # 已下載好的快取資料夾
                 shutil.copytree(scripts_src, self.scripts)
@@ -502,10 +520,14 @@ class Job:
         row = next((r for r in self.manifest() if r["nnn"] == nnn), None)
         if row is None:
             raise PipelineError(f"manifest 沒有第 {nnn} 張")
+        body = tidy(body)
+        check_x(body, f"第 {int(nnn)} 張的照片文字")
+        for k, v in (fixed or {}).items():
+            check_x(v, f"{k}")
         if len(body) > CELL_MAX:
             raise PipelineError(f"第 {int(nnn)} 張的內容有 {len(body)} 字，超過 {CELL_MAX} 字（Excel 一格放不下），請刪減後再產出。")
         path = self.p("text", f"{nnn}.txt")
-        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{CTRL.sub('', body).strip()}\n")
+        open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{body.strip()}\n")
         given = fixed is not None
         fixed = {k: one_line(CTRL.sub("", v)) for k, v in (fixed or {}).items() if v and one_line(CTRL.sub("", v))}   # 值不得帶換行（否則會變成另一個欄位）
         fpath = self.p("fixed", f"{nnn}.txt")
@@ -587,6 +609,10 @@ class Job:
                 if ratio(want, got) < MISMATCH_RATIO or (c and ratio(*c) < 0.34):
                     out.setdefault(nnn, []).append((f, v[f].strip()))
         return out
+
+    def check_names(self) -> None:
+        for r in self.manifest():
+            check_x(r.get("原檔名", ""), f"檔名「{r.get('原檔名', '')[:60]}」")
 
     def drop(self, nnn: str) -> None:
         """使用者選「不放這一張」：從待寫入清單拿掉（還沒寫入的才可以）。照片檔留在暫存、隨工作一起刪，編號不重用。"""
@@ -760,7 +786,12 @@ class Job:
         return json.load(open(self.p(out), encoding="utf-8"))
 
     def save_entries(self, entries: list[dict]) -> None:
-        clean = lambda x: CTRL.sub("", x) if isinstance(x, str) else [CTRL.sub("", y) if isinstance(y, str) else y for y in x] if isinstance(x, list) else x
+        clean = lambda x: tidy(x) if isinstance(x, str) else [tidy(y) if isinstance(y, str) else y for y in x] if isinstance(x, list) else x
+        for i, e in enumerate(entries):
+            for v in e.values():
+                for x in (v if isinstance(v, list) else [v]):
+                    if isinstance(x, str):
+                        check_x(x, f"第 {i + 1} 筆")
         entries[:] = [{k: clean(v) for k, v in e.items()} for e in entries]     # 貼上的控制字元 Excel 不收
         json.dump(entries, open(self.p("entries.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
@@ -779,6 +810,9 @@ class Job:
                 for c in row:
                     if c.data_type == "f":
                         c.data_type = "s"; n += 1
+                    if c.value is not None and len(str(c.value)) >= 32767:   # 到達 Excel 一格上限：內容已被截斷，不得交檔
+                        raise PipelineError(f"產出的 Excel 有一格內容太長（{ws.title}!{c.coordinate} 到達一格 32767 字的上限，會被截斷），"
+                                            "請回上一步刪減該張的文字後再產出。")
         if n:
             wb.save(self.p(OUTPUT))
         return n

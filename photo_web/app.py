@@ -236,7 +236,9 @@ def page():
                 S.add_note = next((ln for ln in added.stdout.splitlines() if ln.startswith("OK 新增")), "")
                 if not S.job.stopped() and not prev:
                     fail_upload("這批照片都是重複的或沒有可處理的照片，沒有新增任何一張。")
+                guard_upload(S.job.check_names)
                 S.how = use.name if use else ""
+                S.notes = {}                                  # 每批開始一律重設提醒（稽核 v3 第 4 輪：沒有讀圖後端時曾沿用上一批的）
                 if use:
                     S.notes = S.job.auto_read(
                         use, on_photo=lambda i, n: bar.progress(i / max(n, 1), text=f"讀圖中（{use.name}）第 {i + 1}／{n} 張…"))
@@ -358,8 +360,23 @@ def page():
             if unsure:
                 st.warning(f"第 {'、'.join(map(str, unsure))} 張可能是別的工程的照片：請在該張下方按「不放這一張」，"
                            "或勾「是同一個工程」。（只有一張時，別的工程請按左側「結束並刪除暫存」重新上傳。）"); st.stop()
+            bad = []                                          # 先全部檢查再寫：不留寫到一半的狀態
             for r in todo:
                 nnn = r["nnn"]
+                for what, v in [("照片文字", S[f"t{nnn}"]), ("檢查項目（讀圖建議）", S.get(f"sug{nnn}", ""))] + list(job.fixed_for(nnn, fx).items()):
+                    try:
+                        pl.check_x(v, f"第 {int(nnn)} 張的{what}")
+                    except pl.PipelineError as e:
+                        bad.append(str(e))
+            if bad:
+                say("error", "；".join(dict.fromkeys(bad))); st.stop()
+            for r in todo:
+                nnn = r["nnn"]
+                job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")   # 按產出當下記在工作上：部分寫入失敗後重試不會掉（稽核 v3 第 4 輪）
+                if S.get(f"form{nnn}", -1) >= 0:
+                    job.chosen_forms[nnn] = (S[f"form{nnn}"], bool(S.get(f"fsame{nnn}")))
+                else:
+                    job.chosen_forms.pop(nnn, None)
                 job.write_text(nnn, S[f"t{nnn}"], job.fixed_for(nnn, fx))
             if todo:
                 res = guard(job.addmany)
@@ -371,10 +388,8 @@ def page():
                     st.rerun()
             if job.pending_base():
                 guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
-            chosen = {r["nnn"]: (S[f"form{r['nnn']}"], bool(S.get(f"fsame{r['nnn']}"))) for r in todo if S.get(f"form{r['nnn']}", -1) >= 0}
-            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries), {
-                r["nnn"]: S.get(f"sug{r['nnn']}", "") for r in todo}), chosen)
-            job.save_entries(S.entries)
+            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries), job.confirmed_sug), job.chosen_forms)
+            guard(job.save_entries, S.entries)
             guard(job.build)
             guard(job.preflight_deliver)
             job.pdf = None
@@ -417,7 +432,7 @@ def page():
                     e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()
                     e["design"] = [x for x in S[f"e{i}design"].splitlines() if x.strip()]
                     e["measured"] = [x for x in S[f"e{i}measured"].splitlines() if x.strip()]
-                job.save_entries(ents)
+                guard(job.save_entries, ents)
                 guard(job.build)
                 guard(job.preflight_deliver)
                 job.pdf = None

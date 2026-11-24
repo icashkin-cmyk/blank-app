@@ -188,8 +188,12 @@ _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")   # 同 pipe
 FIELD_MAX = 200                                          # 單行欄位（工程資料、項目、位置、人員、日期、建議項目…）每欄上限
 
 
+_QBIG = re.compile(r"〔\?\d{4,}〕")                       # 同 pipeline.QBIG
+_XESC = re.compile(r"_x[0-9A-Fa-f]{4}_")                 # 同 pipeline.XESC
+
+
 def _one_line(s: str) -> str:
-    return " ".join(_CTRL.sub("", s).split())                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
+    return " ".join(_QBIG.sub("〔?〕", _CTRL.sub("", s)).split())                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
 
 
 def _find_json(text: str):
@@ -257,6 +261,10 @@ def parse_import(data: bytes) -> dict:
             clean["kind"] = "其他"
         read = PhotoRead.from_dict(clean)
         # 上限算「組成草稿後」的長度（每筆讀數、每個欄位組成草稿時會多出標籤字），不是原始字數
+        m = _XESC.search(json.dumps(clean, ensure_ascii=False))
+        if m:
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」含有「{m.group(0)}」這種字樣（底線、x、四位十六進位、底線），"
+                             "Excel 會把它變成別的字，請改掉後再貼")
         single = list(clean["fixed"].values()) + [v for k, v in clean.items() if isinstance(v, str) and k != "scene"]
         if any(len(x) > FIELD_MAX for x in single) or len(compose_text(read)) > IMPORT_PHOTO_MAX:
             raise ValueError(f"讀圖檔「{str(key)[:40]}」這一筆太長（工程資料、項目、位置、人員、日期、建議項目每欄上限 {FIELD_MAX} 字，"

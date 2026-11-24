@@ -875,4 +875,36 @@ def test_apply_suggestions_uses_only_what_user_confirmed():
     assert [e["item"] for e in got] == ["使用者改過", ""]
     assert [e["item"] for e in j.apply_suggestions(ents(), {})] == ["", ""]
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(guard(job.make_entries), {" in src
+    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(guard(job.make_entries), job.confirmed_sug)" in src
+
+
+def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
+    """稽核 v3 第 4 輪必修 1、2：〔?N〕的 N 超過 3 位數改回〔?〕（否則 Skill 往下編號會把一格撐到幾萬字）；
+    「_x0041_」這種 Excel 會解碼成別的字的字樣一律擋下並說明；產出後任何一格到達 Excel 上限就不交檔。"""
+    assert pl.tidy("甲〔?" + "9" * 3700 + "〕乙〔?12〕丙〔?〕\x00") == "甲〔?〕乙〔?12〕丙〔?〕"
+    for bad in ("A_x0041_B", "_x000A_", "_xd83d_"):
+        with pytest.raises(pl.PipelineError, match="_x"):
+            pl.check_x(bad, "第 1 張")
+        with pytest.raises(ValueError, match="_x"):
+            rd.parse_import(json.dumps({"a.jpg": {"lines": [bad]}}).encode())
+        with pytest.raises(ValueError, match="_x"):
+            rd.parse_import(json.dumps({"a.jpg": {"suggest_item": bad}}).encode())
+    pl.check_x("PVC_x1_ 2.0mm _x00G1_", "第 1 張")                       # 不是四位十六進位：不擋
+    assert rd.parse_import(json.dumps({"a.jpg": {"lines": ["〔?" + "9" * 50 + "〕"]}}).encode())["a.jpg"].lines == ["〔?〕"]
+    from openpyxl import Workbook
+    class J(pl.Job):
+        def __init__(self, d):
+            self.dir = str(d)
+    j = J(tmp_path); wb = Workbook(); wb.active["A1"] = "字" * 40000; wb.save(j.p(pl.OUTPUT))
+    with pytest.raises(pl.PipelineError, match="太長"):
+        j.strings_only()
+
+
+def test_r4_confirmed_values_kept_on_job_and_notes_reset():
+    """稽核 v3 第 4 輪必修 3、4：確認過的建議項目與材料表品項在按產出當下記在工作上（部分寫入失敗後重試不會掉）；每批開始一律重設提醒。"""
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert 'job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")' in src and "job.apply_suggestions(guard(job.make_entries), job.confirmed_sug)" in src
+    assert "job.chosen_forms[nnn] = " in src and "job.chosen_forms)" in src
+    assert src.index("S.notes = {}") < src.index("S.notes = S.job.auto_read(")
+    psrc = Path(pl.__file__).read_text(encoding="utf-8")
+    assert "self.confirmed_sug" in psrc and "self.chosen_forms" in psrc
