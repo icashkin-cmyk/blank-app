@@ -90,7 +90,7 @@ def guard(fn, *a, **k):
         st.stop()
     except Exception as e:                                # 其他例外：不顯示路徑與堆疊（細節寫進伺服器紀錄）
         logging.exception("photo_web 未預期的錯誤")
-        st.error(f"發生未預期的錯誤（{e.__class__.__name__}），這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")
+        st.error(f"發生未預期的錯誤，這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")
         st.stop()
 
 
@@ -102,7 +102,7 @@ def guard_upload(fn, *a, **k):
         fail_upload(str(e))
     except Exception as e:
         logging.exception("photo_web 未預期的錯誤")
-        fail_upload(f"發生未預期的錯誤（{e.__class__.__name__}），沒有收下照片，請重試。")
+        fail_upload(f"發生未預期的錯誤，沒有收下照片，請重試。")
 
 
 def reset():
@@ -208,6 +208,11 @@ def page():
         # 按下後這一輪按鈕就變成不能按，處理中不能再按第二次（第四輪稽核：連按會重複預扣）
         st.button("開始", type="primary", disabled=(not photos) or go, on_click=lambda: S.update(go=True))
         if go and photos:
+            for up in list(photos) + [x for x in (prev, readfile) if x is not None]:
+                try:
+                    pl.check_name_len(up.name)                # 檔名太長：收件前就說清楚（否則存檔時才失敗、訊息看不懂）
+                except pl.PipelineError as e:
+                    fail_upload(str(e))
             files = [(p.name, p.getvalue()) for p in photos]
             use = READER
             raw = readtext.strip().encode("utf-8") if readtext.strip() else (readfile.getvalue() if readfile is not None else b"")
@@ -386,12 +391,17 @@ def page():
                     S.review_err = (f"有 {len(left)} 張沒有寫入，請照說明修改後再按一次「產出 Excel」：\n\n"
                                     + "\n".join(f"- {pl.sanitize(pl.nth(w), job.dir)}" for w in why))
                     st.rerun()
-            if job.pending_base():
-                guard(job.confirm_base, ["--all"])            # 使用者已在本頁確認工程資料
-            S.entries = job.apply_forms(job.apply_suggestions(guard(job.make_entries), job.confirmed_sug), job.chosen_forms)
-            guard(job.save_entries, S.entries)
-            guard(job.build)
-            guard(job.preflight_deliver)
+            try:                                              # 文字已寫入：這之後失敗就改不了，訊息要明講怎麼做
+                if job.pending_base():
+                    job.confirm_base(["--all"])               # 使用者已在本頁確認工程資料
+                S.entries = job.apply_forms(job.apply_suggestions(job.make_entries(), job.confirmed_sug), job.chosen_forms)
+                job.save_entries(S.entries)
+                job.build()
+                job.check_output()
+                job.preflight_deliver()
+            except pl.PipelineError as e:
+                S.review_err = str(e) + ("" if pl.STUCK in str(e) else " " + pl.STUCK)
+                st.rerun()
             job.pdf = None
             S.stage = "done"; st.rerun()
 
@@ -425,8 +435,8 @@ def page():
                 with c2:
                     st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec", max_chars=max(200, len(e["sec"])))
                     st.text_input("檢查項目", value=e["item"], key=f"e{i}item", max_chars=max(200, len(e["item"])))
-                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=pl.MAX_TEXT)
-                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=pl.MAX_TEXT)
+                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=max(pl.MAX_TEXT, len("\n".join(e["design"]))))
+                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=max(pl.MAX_TEXT, len("\n".join(e["measured"]))))
                     st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg", max_chars=max(200, len(e["bldg"])))
             if st.button("重新產出 Excel"):
                 for i, e in enumerate(ents):
@@ -435,6 +445,7 @@ def page():
                     e["measured"] = [x for x in S[f"e{i}measured"].splitlines() if x.strip()]
                 guard(job.save_entries, ents)
                 guard(job.build)
+                guard(job.check_output)
                 guard(job.preflight_deliver)
                 job.pdf = None
                 st.rerun()
@@ -460,5 +471,5 @@ except pl.PipelineError as e:
 except Exception as e:  # 未預期的錯誤：不顯示路徑與堆疊（st.stop／st.rerun 不是 Exception，不會被攔）
     logging.exception("photo_web 未預期的錯誤")
     if S.stage == "upload":                               # 清掉半成品、退回預扣，重跑頁面讓「開始」可以再按（第五輪稽核建議）
-        fail_upload(f"發生未預期的錯誤（{e.__class__.__name__}），沒有收下照片，請重試。")
-    st.error(f"發生未預期的錯誤（{e.__class__.__name__}），這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")
+        fail_upload(f"發生未預期的錯誤，沒有收下照片，請重試。")
+    st.error(f"發生未預期的錯誤，這一步沒有完成。請重試，或按左側「結束並刪除暫存」重新開始。")

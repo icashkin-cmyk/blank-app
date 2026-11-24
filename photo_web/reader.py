@@ -184,16 +184,17 @@ kind 只能是 """ + "、".join(KINDS) + """ 其中一個；fixed 是 {"工程�
 我會把你輸出的 JSON 貼到網頁，和照片一起上傳。"""
 
 
-_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")   # 同 pipeline.CTRL：Excel 不收的控制字元
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029\ufffe\uffff]")   # 同 pipeline.CTRL：Excel 不收的控制字元
 FIELD_MAX = 200                                          # 單行欄位（工程資料、項目、位置、人員、日期、建議項目…）每欄上限
 
 
-_QBIG = re.compile(r"〔\?\d{4,}〕")                       # 同 pipeline.QBIG
+_QBIG = re.compile(r"〔\?[0-9０-９]{4,}〕")                # 待確認編號太大：拒收並說明（不靜默改）
+_NOTE = re.compile(r"（[^（）\n]*）")                      # 同 pipeline.NOTE
 _XESC = re.compile(r"_x[0-9A-Fa-f]{4}_")                 # 同 pipeline.XESC
 
 
 def _one_line(s: str) -> str:
-    return " ".join(_QBIG.sub("〔?〕", _CTRL.sub("", s)).split())                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
+    return _CTRL.sub("", " ".join(s.split()))             # 先把各種換行、定位、連續空白變一個空白，再去掉控制字元                             # 換行、定位、U+2028 等空白一律變一個空白（單行欄位不得帶換行）
 
 
 def _find_json(text: str):
@@ -261,7 +262,10 @@ def parse_import(data: bytes) -> dict:
             clean["kind"] = "其他"
         read = PhotoRead.from_dict(clean)
         # 上限算「組成草稿後」的長度（每筆讀數、每個欄位組成草稿時會多出標籤字），不是原始字數
-        m = _XESC.search(json.dumps(clean, ensure_ascii=False))
+        if _QBIG.search(json.dumps(clean, ensure_ascii=False)):
+            raise ValueError(f"讀圖檔「{str(key)[:40]}」的待確認編號太大（〔?N〕的 N 最多 3 位數），請改成〔?〕後再貼")
+        flatj = json.dumps(clean, ensure_ascii=False)
+        m = _XESC.search(flatj) or _XESC.search(_NOTE.sub("", flatj))
         if m:
             raise ValueError(f"讀圖檔「{str(key)[:40]}」含有「{m.group(0)}」這種字樣（底線、x、四位十六進位、底線），"
                              "Excel 會把它變成別的字，請改掉後再貼")

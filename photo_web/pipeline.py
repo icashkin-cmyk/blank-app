@@ -44,7 +44,7 @@ FIXED_FIELDS = ["工程名稱", "監造單位", "承造單位"]
 Q_MARK = "〔?〕"
 MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
 SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
-CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
 CELL_MAX = 30000                     # 寫檔前的最後一道：Excel 一格上限 32767 字
 
@@ -54,15 +54,35 @@ XESC = re.compile(r"_x[0-9A-Fa-f]{4}_")  # Excel 檔案格式會把「_x0041_」
 X_WHY = "含有「{m}」這種字樣（底線、x、四位十六進位、底線），Excel 會把它變成別的字，請改掉其中一個底線或刪掉後再試"
 
 
+NOTE = re.compile(r"（[^（）\n]*）")      # Skill 會拿掉或加上的全形括號註記（例：「（≠查驗時間）」）；拿掉後才拼出來的字樣也要查
+NAME_MAX = 200                           # 檔名上限（UTF-8 位元組；檔案系統上限 255，留給編號與副檔名）
+STUCK = "這一批的文字已經寫入，沒辦法在這一頁修改：請按左側「結束並刪除暫存」，重新上傳照片，並避開上面說的問題。"
+
+
 def tidy(s: str) -> str:
-    """寫檔前的整理：去掉控制字元、過長的〔?N〕改回〔?〕。"""
-    return QBIG.sub("〔?〕", CTRL.sub("", s))
+    """寫檔前的整理：去掉看不見的控制字元（含 U+0085、U+2028、U+2029 這三種特殊換行）。看得見的字不動。"""
+    return CTRL.sub("", s)
+
+
+def flat(s) -> str:
+    """單行欄位寫入前：換行、定位變一個空白，去掉頭尾空白；中間的空白（含連續空白、全形空白）原樣。"""
+    return re.sub(r"\r\n|[\r\n\t]", " ", str(s or "")).strip()
 
 
 def check_x(s, where: str) -> None:
-    m = XESC.search(CTRL.sub("", str(s or "")))            # 先去掉控制字元再查：寫檔時控制字元會被去掉，「_x00<DEL>41_」會變成「_x0041_」
+    """寫入前擋下 Excel 會改寫的字樣（擋下並說明，不靜默改）。先去掉控制字元再查：寫檔時控制字元會被去掉。"""
+    t = CTRL.sub("", str(s or ""))
+    m = XESC.search(t) or XESC.search(NOTE.sub("", t))
     if m:
         raise PipelineError(f"{where}" + X_WHY.format(m=m.group(0)))
+    q = re.search(r"〔\?[0-9０-９]{4,}〕", t)
+    if q:
+        raise PipelineError(f"{where}的待確認編號「{q.group(0)[:12]}{'…' if len(q.group(0)) > 12 else ''}」太大（最多 3 位數），請改成〔?〕，編號會在產出時自動排。")
+
+
+def check_name_len(name: str) -> None:
+    if len(os.path.basename(str(name)).encode("utf-8")) > NAME_MAX:
+        raise PipelineError(f"檔名太長（「{os.path.basename(str(name))[:20]}…」），請把檔名改短（中文約 60 字以內）後重新上傳。")
 
 
 def one_line(s) -> str:
@@ -119,8 +139,11 @@ def _zip_images(data: bytes) -> list[zipfile.ZipInfo]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             # 條件要和既有腳本 log_photo.prep 完全相同（只排除「._」開頭）；不同的話，上限會被繞過（第二輪稽核 F4）
-            return [i for i in z.infolist() if os.path.basename(i.filename) and i.filename.lower().endswith(IMG_EXT)
-                    and not os.path.basename(i.filename).startswith("._")]
+            got = [i for i in z.infolist() if os.path.basename(i.filename) and i.filename.lower().endswith(IMG_EXT)
+                   and not os.path.basename(i.filename).startswith("._")]
+            for i in got:
+                check_name_len(i.filename)
+            return got
     except zipfile.BadZipFile as e:
         raise PipelineError("zip 檔打不開，請重新壓縮後再上傳") from e
 
@@ -529,7 +552,7 @@ class Job:
         path = self.p("text", f"{nnn}.txt")
         open(path, "w", encoding="utf-8").write(f"來源：photos/{nnn}_grid.jpg（{row['原檔名']}）\n{body.strip()}\n")
         given = fixed is not None
-        fixed = {k: one_line(CTRL.sub("", v)) for k, v in (fixed or {}).items() if v and one_line(CTRL.sub("", v))}   # 值不得帶換行（否則會變成另一個欄位）
+        fixed = {k: flat(CTRL.sub("", v)) for k, v in (fixed or {}).items() if v and flat(CTRL.sub("", v))}   # 值不得帶換行（否則會變成另一個欄位）
         fpath = self.p("fixed", f"{nnn}.txt")
         if fixed:
             os.makedirs(self.p("fixed"), exist_ok=True)
@@ -614,6 +637,7 @@ class Job:
         """收件後檢查原檔名（含 zip 裡的）：控制字元、換行、定位等會讓後面寫工作檔或 Excel 失敗，收件時就擋下。"""
         for r in self.manifest():
             name = r.get("原檔名", "")
+            check_name_len(name)
             shown = one_line(CTRL.sub("", name))[:60]
             if CTRL.search(name) or re.search("[\t\n\r\x0b\x0c\x85\u2028\u2029]", name):
                 raise PipelineError(f"檔名「{shown}」含有看不見的控制字元、換行或定位字元，請改檔名後重新上傳（zip 裡的檔名也算）。")
@@ -685,7 +709,7 @@ class Job:
                 got = self.reads.get(row.get("sha256", ""))
                 sug = got.suggest_item if got else ""
             else:
-                sug = one_line(CTRL.sub("", confirmed.get(row.get("nnn", ""), "")))[:200]
+                sug = flat(CTRL.sub("", confirmed.get(row.get("nnn", ""), "")))[:200]
             if (not e["item"] or e["item"].startswith(("—", "UNKNOWN"))) and sug:
                 e["item"] = sug
             elif e["item"].startswith(("—", "UNKNOWN")):
@@ -821,6 +845,16 @@ class Job:
         if n:
             wb.save(self.p(OUTPUT))
         return n
+
+    def check_output(self) -> None:
+        """產出後直接看 xlsx 裡的 XML：還有「_xHHHH_」字樣（例如 Skill 處理後才拼出來的）就不交檔。
+        這時文字已寫入，確認頁改不了，訊息要明講怎麼做（稽核 v3 第 6 輪必修 1、2）。"""
+        with zipfile.ZipFile(self.p(OUTPUT)) as z:
+            for n in z.namelist():
+                if n == "xl/sharedStrings.xml" or n.startswith("xl/worksheets/"):
+                    m = XESC.search(z.read(n).decode("utf-8", "replace"))
+                    if m:
+                        raise PipelineError("產出的 Excel 裡" + X_WHY.format(m=m.group(0)).replace("後再試", "") + "。" + STUCK)
 
     def preflight_deliver(self) -> StepResult:
         return self.must(self.run("交檔檢查", "preflight.py", "deliver", OUTPUT, "entries.json"), "交檔檢查有 FAIL，不得交檔")

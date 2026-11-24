@@ -830,9 +830,9 @@ def test_parse_import_composed_length_and_surrogate_and_newline():
 
 def test_write_text_fixed_newline_cannot_inject(job_with_photo=None):
     """M4 根因：fixed 的值帶換行時不能變成另一個欄位。"""
-    assert pl.one_line("甲\n監造單位：乙\u2028丙\t丁") == "甲 監造單位：乙 丙 丁"
+    assert pl.flat("  甲\n監造單位：乙\r\n丙\t丁  戊　己 ") == "甲 監造單位：乙 丙 丁  戊　己"   # 只把換行、定位變空白、去頭尾；中間的空白原樣（第 6 輪必修 4）
     src = Path(pl.__file__).read_text(encoding="utf-8")
-    assert "one_line(CTRL.sub" in src
+    assert "flat(CTRL.sub" in src
 
 
 def test_parse_import_limits_length_and_windows_path():
@@ -875,13 +875,17 @@ def test_apply_suggestions_uses_only_what_user_confirmed():
     assert [e["item"] for e in got] == ["使用者改過", ""]
     assert [e["item"] for e in j.apply_suggestions(ents(), {})] == ["", ""]
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(guard(job.make_entries), job.confirmed_sug)" in src
+    assert 'key=f"sug{nnn}"' in src and "job.apply_suggestions(job.make_entries(), job.confirmed_sug)" in src
 
 
 def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
     """稽核 v3 第 4 輪必修 1、2：〔?N〕的 N 超過 3 位數改回〔?〕（否則 Skill 往下編號會把一格撐到幾萬字）；
     「_x0041_」這種 Excel 會解碼成別的字的字樣一律擋下並說明；產出後任何一格到達 Excel 上限就不交檔。"""
-    assert pl.tidy("甲〔?" + "9" * 3700 + "〕乙〔?12〕丙〔?〕\x00") == "甲〔?〕乙〔?12〕丙〔?〕"
+    assert pl.tidy("甲〔?12〕丙〔?〕\x00\u2028\x85") == "甲〔?12〕丙〔?〕"
+    for big in ("甲〔?" + "9" * 3700 + "〕", "〔?1234〕", "〔?１２３４〕"):                # 第 6 輪：不靜默改，擋下並說明
+        with pytest.raises(pl.PipelineError, match="編號"):
+            pl.check_x(big, "第 1 張")
+    pl.check_x("〔?999〕〔?〕", "第 1 張")
     for bad in ("A_x0041_B", "_x000A_", "_xd83d_"):
         with pytest.raises(pl.PipelineError, match="_x"):
             pl.check_x(bad, "第 1 張")
@@ -890,7 +894,8 @@ def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
         with pytest.raises(ValueError, match="_x"):
             rd.parse_import(json.dumps({"a.jpg": {"suggest_item": bad}}).encode())
     pl.check_x("PVC_x1_ 2.0mm _x00G1_", "第 1 張")                       # 不是四位十六進位：不擋
-    assert rd.parse_import(json.dumps({"a.jpg": {"lines": ["〔?" + "9" * 50 + "〕"]}}).encode())["a.jpg"].lines == ["〔?〕"]
+    with pytest.raises(ValueError, match="編號"):
+        rd.parse_import(json.dumps({"a.jpg": {"lines": ["〔?" + "9" * 50 + "〕"]}}).encode())
     from openpyxl import Workbook
     class J(pl.Job):
         def __init__(self, d):
@@ -903,7 +908,7 @@ def test_r4_big_question_number_and_xescape_and_cell_limit(tmp_path):
 def test_r4_confirmed_values_kept_on_job_and_notes_reset():
     """稽核 v3 第 4 輪必修 3、4：確認過的建議項目與材料表品項在按產出當下記在工作上（部分寫入失敗後重試不會掉）；每批開始一律重設提醒。"""
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
-    assert 'job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")' in src and "job.apply_suggestions(guard(job.make_entries), job.confirmed_sug)" in src
+    assert 'job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")' in src and "job.apply_suggestions(job.make_entries(), job.confirmed_sug)" in src
     assert "job.chosen_forms[nnn] = " in src and "job.chosen_forms)" in src
     assert src.index("S.notes = {}") < src.index("S.notes = S.job.auto_read(")
     psrc = Path(pl.__file__).read_text(encoding="utf-8")
@@ -937,3 +942,33 @@ def test_r5_xescape_checked_after_ctrl_strip_and_names(tmp_path):
     assert [(c.value, c.data_type) for c in (ws["A1"], ws["A2"])] == [("#N/A", "s"), ("#DIV/0!", "s")]
     src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
     assert "重複的欄" in src                                   # 下載頁說明可見分頁照 Skill 規則精簡（必修 2 的裁定：加說明）
+
+
+def test_r6_output_scan_and_long_names_and_no_truncation(tmp_path):
+    """稽核 v3 第 6 輪：產出後直接看 xlsx 內的 XML，還有「_xHHHH_」（例如 Skill 處理後才拼出來的）就不交檔，並明講要怎麼做；
+    括號註記被拿掉後才形成的也在寫入前先擋；檔名太長在收件時用看得懂的話擋下；下載頁文字框不得把內容切到 4000 字；訊息不露例外名稱。"""
+    from openpyxl import Workbook
+    class J(pl.Job):
+        def __init__(self, d):
+            self.dir = str(d)
+    j = J(tmp_path); wb = Workbook(); wb.active["A1"] = "備註_x0041_尾"; wb.save(j.p(pl.OUTPUT))
+    with pytest.raises(pl.PipelineError, match="結束並刪除暫存"):
+        j.check_output()
+    wb = Workbook(); wb.active["A1"] = "備註_X0041_尾 _x1_ 正常"; wb.save(j.p(pl.OUTPUT))
+    j.check_output()
+    with pytest.raises(pl.PipelineError, match="_x0041_"):
+        pl.check_x("照片日期：2026-10-27 備註_x00（≠查驗時間）41_尾", "第 1 張")
+    class N(pl.Job):
+        def __init__(self, names):
+            self.names = names
+        def manifest(self):
+            return [{"nnn": "001", "原檔名": n} for n in self.names]
+    with pytest.raises(pl.PipelineError, match="檔名太長"):
+        N(["長" * 100 + ".jpg"]).check_names()
+    with pytest.raises(pl.PipelineError, match="檔名太長"):
+        pl.check_name_len("長" * 90 + ".xlsx")
+    pl.check_name_len("IMG_0001 (2).jpeg")
+    src = (Path(pl.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "__class__.__name__" not in src
+    assert "max_chars=pl.MAX_TEXT" not in src and src.count("max_chars=max(pl.MAX_TEXT, len(") >= 3
+    assert "pl.check_name_len(" in src and "job.check_output" in src and "pl.STUCK" in src
