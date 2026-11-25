@@ -54,6 +54,8 @@ READER = _reader()
 USAGE = pl.Usage()                                    # 側欄的 reset() 會用到，要先定義（第四輪稽核：NameError）
 if S.job and not S.job.alive():                       # 工作資料夾已不在（閒置太久被清除）
     S.job, S.stage = None, "upload"
+    for _k in ("review_err", "fixed_note", "produce_msg", "re_msg", "late_note"):
+        S.pop(_k, None)
     st.warning("上一次的工作閒置太久，暫存已清除，請重新上傳。")
 if S.job and S.stage == "upload":                     # 上一輪收件或讀圖被中斷（處理中改了檔案等）：清掉並退回沒用到的預扣
     S.job.abandon(USAGE); S.job = None
@@ -64,7 +66,8 @@ pl.recover(USAGE)                                     # 別的工作階段中斷
 pl.sweep()
 
 
-_SAY = {"error": "background:rgba(255,43,43,.14);border-left:4px solid #ff4b4b;padding:.75rem 1rem;border-radius:.5rem;margin:0 0 1rem",
+_SAY = {"warning": "background:rgba(255,227,18,.16);border-left:4px solid #ffd21f;padding:.75rem 1rem;border-radius:.5rem;margin:0 0 1rem",
+        "error": "background:rgba(255,43,43,.14);border-left:4px solid #ff4b4b;padding:.75rem 1rem;border-radius:.5rem;margin:0 0 1rem",
         "caption": "font-size:.875rem;opacity:.6;margin:0 0 .5rem"}
 
 
@@ -109,6 +112,8 @@ def reset():
     if S.job:
         S.job.abandon(USAGE)                              # 還沒結清的預扣退回（付費讀圖已送出的張數照算）；已結清的不退
     S.job, S.stage = None, "upload"
+    for k in ("review_err", "fixed_note", "produce_msg", "re_msg", "late_note"):   # 上一批的提示不留到下一批（稽核 v3 第 12 輪）
+        S.pop(k, None)
 
 
 def fail_upload(msg: str):
@@ -126,6 +131,7 @@ with st.sidebar:
     if S.job:
         st.divider()
         if st.button("結束並刪除暫存", type="secondary"):
+            guard(S.job.wait_idle)                            # 產出跑到一半時等它做完再刪（不留寫到一半的檔案）
             reset(); st.rerun()
         with st.expander("執行紀錄"):
             for r in S.job.log:
@@ -254,6 +260,23 @@ def page():
             S.stage = "review"; st.rerun()
 
     job = S.job
+    if job:
+        guard(job.wait_idle)
+    gen0 = job.gen if job else 0                      # 連按兩下時前一輪產出還在跑：等它做完再畫這一頁（不讀寫到一半的檔案）
+
+    def _apply_outcome():                                 # 產出的結果搬到畫面狀態；搬到一半被中斷的話下一輪再搬一次（結果相同）
+        o = getattr(job, "outcome", None)
+        if o:
+            if o[0] == "done":
+                S.entries = o[1]
+                S.stage = "done"
+                for k in ("review_err", "fixed_note", "produce_msg"):   # 確認頁的提示：已到下載頁就不再適用
+                    S.pop(k, None)
+            else:
+                S.review_err = o[1]
+            job.outcome = None
+    if job:
+        _apply_outcome()
 
     # ---------- 2 確認內容（一頁）----------
     if S.stage == "review":
@@ -272,6 +295,8 @@ def page():
         say("caption", f"讀字方式：{how}" + (f"｜收件：{S.add_note.removeprefix('OK ')}" if S.get("add_note") else ""))
         if S.get("review_err"):
             say("error", S.pop("review_err"))
+        if S.get("late_note"):
+            say("warning", S.pop("late_note"))
         if todo:
             # 固定欄位：整批共用，預設取各張讀到的多數寫法；使用者在這裡確認一次（各張寫法不同時不再逐張擋下）
             st.subheader("工程資料（整批共用，確認一次）")
@@ -286,7 +311,7 @@ def page():
                 with c:
                     if f"fx{f}" not in S:
                         S[f"fx{f}"] = opts[f][0][0] if opts[f] else ""
-                    st.text_input(f, key=f"fx{f}", max_chars=max(200, pl.u16(S.get(f"fx{f}", ""))), on_change=_fx_changed)
+                    st.text_input(f, key=f"fx{f}", max_chars=2 * job.limit(f"fx{f}", pl.FIELD_MAX, *[v for v, _ in opts[f]]), on_change=_fx_changed)
                     if not opts[f]:
                         st.caption("照片上沒讀到這一欄；知道的話可以自己填（會記在這一批），不知道就留空。")
                     elif len(opts[f]) > 1:
@@ -308,8 +333,11 @@ def page():
             def _one():                                       # 取消任何一張：「全選」跟著取消
                 S.all_ok = all(S.get(f"ok{r['nnn']}") for r in job.stopped())
             def _drop(nnn):                                   # 從這一批拿掉一張；其餘已打的勾留著
-                try:
-                    job.drop(nnn)
+                try:                                          # 已按下產出或產出正在跑：這一下不生效，當場告知（不和產出同時改工作清單）
+                    if S.stage != "review" or not job.drop_if_idle(nnn, getattr(job, "go", False)):
+                        S.late_note = (f"產出已經開始，第 {int(nnn)} 張沒有拿掉，產出的 Excel 裡仍有這一張。"
+                                       "要拿掉請按「結束並刪除暫存」，重新上傳時不要放這一張。")
+                        return
                 except pl.PipelineError as e:
                     S.review_err = str(e); return
                 for k in (f"ok{nnn}", f"t{nnn}", f"form{nnn}", f"fsame{nnn}", f"sug{nnn}"):
@@ -340,10 +368,10 @@ def page():
                                  + "，和上面確認的不一樣。產出時這一張會記成上面的工程資料。")
                         st.checkbox("是同一個工程（只是讀錯字），照上面的工程資料寫入", key=f"same{nnn}v{S.get('fxver', 0)}")
                     st.text_area("照片文字", value=job.draft(nnn), height=300, key=f"t{nnn}", label_visibility="collapsed",
-                                 max_chars=max(pl.MAX_TEXT, pl.u16(job.draft(nnn))))
+                                 max_chars=2 * job.limit(f"t{nnn}", pl.MAX_TEXT, job.draft(nnn)))
                     if nnn in sugs:                           # 讀圖建議的檢查項目：看得到、可改、可清空，產出時只用這一格的值
                         st.text_input("檢查項目（讀圖建議；照片文字沒有「查驗項目」時才會用，可改、可清空）", value=sugs[nnn],
-                                      key=f"sug{nnn}", max_chars=max(200, pl.u16(sugs[nnn])))
+                                      key=f"sug{nnn}", max_chars=2 * job.limit(f"sug{nnn}", pl.FIELD_MAX, sugs[nnn]))
                     if job.forms():                           # 材料表品項：用選的，不靠讀字
                         fo = dict(job.form_options(nnn))
                         st.selectbox("材料表品項（選用）", [-1] + list(fo), key=f"form{nnn}",
@@ -356,62 +384,63 @@ def page():
                         st.button("不放這一張（從這一批拿掉）", key=f"drop{nnn}", on_click=_drop, args=(nnn,))
         else:
             st.success("這次沒有新照片要確認，可以直接產出。")
-        if st.button("產出 Excel", type="primary"):
-            miss = [int(r["nnn"]) for r in todo if not S.get(f"ok{r['nnn']}")]
-            if miss:
-                st.warning(f"還有 {len(miss)} 張沒打勾（第 {'、'.join(map(str, miss))} 張）。看過後逐張打勾，或勾「全選」。"); st.stop()
-            fx = {f: S.get(f"fx{f}", "").strip() for f in pl.FIXED_FIELDS}
-            unsure = [int(n) for n in sorted(job.fixed_mismatch(fx)) if not S.get(f"same{n}v{S.get('fxver', 0)}")] if todo else []
-            if unsure:
-                st.warning(f"第 {'、'.join(map(str, unsure))} 張可能是別的工程的照片：請在該張下方按「不放這一張」，"
-                           "或勾「是同一個工程」。（只有一張時，別的工程請按左側「結束並刪除暫存」重新上傳。）"); st.stop()
-            bad = []                                          # 先全部檢查再寫：不留寫到一半的狀態
-            for r in todo:
-                nnn = r["nnn"]
-                for what, v in [("照片文字", S[f"t{nnn}"]), ("檢查項目（讀圖建議）", S.get(f"sug{nnn}", ""))] + list(job.fixed_for(nnn, fx).items()):
+        go = getattr(job, "go", False)                    # 按鈕按下時記在工作上，做的那一輪才清掉（被中斷的話下一輪接手）
+        if S.get("produce_msg"):                          # 上一次按產出被擋下的原因：顯示在按鈕旁
+            say(*S.pop("produce_msg"))
+
+        def _halt(kind, text):                            # 擋下：記下原因、重畫（按鈕恢復可按）
+            S.produce_msg = (kind, text)
+            job.go = False
+            st.rerun()
+        # 按下後這一輪按鈕就變成不能按；同一個工作的產出一次只跑一輪（稽核 v3 第 11 輪必修 1：連按兩下曾讓兩輪同時跑）
+        st.button("產出 Excel", type="primary", disabled=go, on_click=lambda: setattr(job, "go", True))
+        if go:
+            with job.working() as mine:
+                if not mine or not getattr(job, "go", False) or S.stage != "review":   # 別輪已經做了：不重做，照它的結果重畫
+                    st.rerun()
+                miss = [int(r["nnn"]) for r in todo if not S.get(f"ok{r['nnn']}")]
+                if miss:
+                    _halt("warning", f"還有 {len(miss)} 張沒打勾（第 {'、'.join(map(str, miss))} 張）。看過後逐張打勾，或勾「全選」。")
+                fx = {f: S.get(f"fx{f}", "").strip() for f in pl.FIXED_FIELDS}
+                unsure = [int(n) for n in sorted(job.fixed_mismatch(fx)) if not S.get(f"same{n}v{S.get('fxver', 0)}")] if todo else []
+                if unsure:
+                    _halt("warning", f"第 {'、'.join(map(str, unsure))} 張可能是別的工程的照片：請在該張下方按「不放這一張」，"
+                          "或勾「是同一個工程」。（只有一張時，別的工程請按左側「結束並刪除暫存」重新上傳。）")
+                bad = []                                          # 先全部檢查再寫：不留寫到一半的狀態
+
+                def _chk(fn, *a):
                     try:
-                        pl.check_x(v, f"第 {int(nnn)} 張的{what}")
+                        fn(*a)
                     except pl.PipelineError as e:
                         bad.append(str(e))
-            try:
-                pl.check_q_total([S[f"t{r['nnn']}"] for r in todo], [int(r["nnn"]) for r in todo])
-            except pl.PipelineError as e:
-                bad.append(str(e))
-            if bad:
-                say("error", "；".join(dict.fromkeys(bad))); st.stop()
-            for r in todo:
-                nnn = r["nnn"]
-                job.confirmed_sug[nnn] = S.get(f"sug{nnn}", "")   # 按產出當下記在工作上：部分寫入失敗後重試不會掉（稽核 v3 第 4 輪）
-                if S.get(f"form{nnn}", -1) >= 0:
-                    job.chosen_forms[nnn] = (S[f"form{nnn}"], bool(S.get(f"fsame{nnn}")))
-                else:
-                    job.chosen_forms.pop(nnn, None)
-                job.write_text(nnn, S[f"t{nnn}"], job.fixed_for(nnn, fx))
-            if todo:
-                res = guard(job.addmany)
-                left = job.stopped()
-                if left:                                      # 還有寫不進去的：說明原因，留在這一頁改
-                    why = [ln for ln in res.stdout.splitlines() if ln.startswith("未寫入：")]
-                    S.review_err = (f"有 {len(left)} 張沒有寫入，請照說明修改後再按一次「產出 Excel」：\n\n"
-                                    + "\n".join(f"- {pl.sanitize(pl.nth(w), job.dir)}" for w in why))
-                    st.rerun()
-            try:                                              # 文字已寫入：這之後失敗就改不了，訊息要明講怎麼做
-                if job.pending_base():
-                    job.confirm_base(["--all"])               # 使用者已在本頁確認工程資料
-                S.entries = job.apply_forms(job.apply_suggestions(job.make_entries(), job.confirmed_sug), job.chosen_forms)
-                job.save_entries(S.entries)
-                job.build()
-                job.check_output()
-                job.preflight_deliver()
-            except pl.PipelineError as e:
-                S.review_err = str(e) + ("" if pl.STUCK in str(e) else " " + pl.STUCK)
+                for f in pl.FIXED_FIELDS if todo else []:         # 字數上限：超過就說明，不靜默截斷（稽核 v3 第 11 輪必修 3）
+                    _chk(pl.check_len, fx[f], job.limit(f"fx{f}", pl.FIELD_MAX), f"工程資料的{f}")
+                for r in todo:
+                    nnn = r["nnn"]
+                    _chk(pl.check_len, S[f"t{nnn}"], job.limit(f"t{nnn}", pl.MAX_TEXT), f"第 {int(nnn)} 張的照片文字")
+                    _chk(pl.check_len, S.get(f"sug{nnn}", "").strip(), job.limit(f"sug{nnn}", pl.FIELD_MAX), f"第 {int(nnn)} 張的檢查項目（讀圖建議）")
+                    for what, v in [("照片文字", S[f"t{nnn}"]), ("檢查項目（讀圖建議）", S.get(f"sug{nnn}", ""))] + list(job.fixed_for(nnn, fx).items()):
+                        _chk(pl.check_x, v, f"第 {int(nnn)} 張的{what}")
+                try:
+                    pl.check_q_total([S[f"t{r['nnn']}"] for r in todo], [int(r["nnn"]) for r in todo])
+                except pl.PipelineError as e:
+                    bad.append(str(e))
+                if bad:
+                    _halt("error", "；".join(dict.fromkeys(bad)))
+                inputs = {r["nnn"]: (S[f"t{r['nnn']}"], S.get(f"sug{r['nnn']}", ""), S.get(f"form{r['nnn']}", -1), bool(S.get(f"fsame{r['nnn']}")))
+                          for r in todo}
+                # 從這裡到做完不讀寫 session_state、不呼叫 st：Streamlit 只在那些地方才會被第二下按鈕中斷，
+                # 寫到一半被中斷會留下壞檔與卡住的頁面（稽核 v3 第 11 輪必修 1）。結果先記在工作上，再搬到畫面狀態。
+                job.go = False
+                job.outcome = job.produce(inputs, fx)
+                _apply_outcome()
                 st.rerun()
-            job.pdf = None
-            S.stage = "done"; st.rerun()
 
     # ---------- 3 下載 ----------
     if S.stage == "done":
         st.header("3 下載")
+        if S.get("late_note"):
+            say("warning", S.pop("late_note"))
         st.success("Excel 已產出，交檔檢查全部 PASS。")
         ents = S.get("entries") or []
         todo_notes = []
@@ -437,22 +466,44 @@ def page():
                     if e.get("photo"):
                         st.image(job.p(e["photo"]), width="stretch")
                 with c2:
-                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec", max_chars=max(200, pl.u16(e["sec"])))
-                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item", max_chars=max(200, pl.u16(e["item"])))
-                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=max(pl.MAX_TEXT, pl.u16("\n".join(e["design"]))))
-                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=max(pl.MAX_TEXT, pl.u16("\n".join(e["measured"]))))
-                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg", max_chars=max(200, pl.u16(e["bldg"])))
-            if st.button("重新產出 Excel"):
-                for i, e in enumerate(ents):
-                    e["sec"], e["item"], e["bldg"] = S[f"e{i}sec"].strip(), S[f"e{i}item"].strip(), S[f"e{i}bldg"].strip()
-                    e["design"] = [x for x in pl.tidy(S[f"e{i}design"]).splitlines() if x.strip()]   # 先去控制字元再切行（否則 U+2028 等會變成換行）
-                    e["measured"] = [x for x in pl.tidy(S[f"e{i}measured"]).splitlines() if x.strip()]
-                guard(job.save_entries, ents)
-                guard(job.build)
-                guard(job.check_output)
-                guard(job.preflight_deliver)
-                job.pdf = None
-                st.rerun()
+                    st.text_input("分項工程名稱", value=e["sec"], key=f"e{i}sec", max_chars=2 * job.limit(f"e{i}sec", pl.FIELD_MAX, e["sec"]))
+                    st.text_input("檢查項目", value=e["item"], key=f"e{i}item", max_chars=2 * job.limit(f"e{i}item", pl.FIELD_MAX, e["item"]))
+                    st.text_area("設計/標準值（一行一項）", value="\n".join(e["design"]), key=f"e{i}design", height=150, max_chars=2 * job.limit(f"e{i}design", pl.MAX_TEXT, "\n".join(e["design"])))
+                    st.text_area("實測值（一行一項）", value="\n".join(e["measured"]), key=f"e{i}measured", height=100, max_chars=2 * job.limit(f"e{i}measured", pl.MAX_TEXT, "\n".join(e["measured"])))
+                    st.text_input("棟別/層別/空間編號/空間位置", value=e["bldg"], key=f"e{i}bldg", max_chars=2 * job.limit(f"e{i}bldg", pl.FIELD_MAX, e["bldg"]))
+            go2 = getattr(job, "go2", False)
+            if S.get("re_msg"):
+                say("error", S.pop("re_msg"))
+            st.button("重新產出 Excel", disabled=go2, on_click=lambda: setattr(job, "go2", True))
+            if go2:
+                with job.working() as mine:
+                    if not mine or not getattr(job, "go2", False):
+                        st.rerun()
+                    new, bad = [], []
+                    for i, e in enumerate(ents):                  # 先全部檢查再改：超過字數上限就說明，不靜默截斷
+                        n = {"sec": S[f"e{i}sec"].strip(), "item": S[f"e{i}item"].strip(), "bldg": S[f"e{i}bldg"].strip(),
+                             # 先去控制字元再切行（否則 U+2028 等會變成換行）
+                             "design": [x for x in pl.tidy(S[f"e{i}design"]).splitlines() if x.strip()],
+                             "measured": [x for x in pl.tidy(S[f"e{i}measured"]).splitlines() if x.strip()]}
+                        for k, label, base in [("sec", "分項工程名稱", pl.FIELD_MAX), ("item", "檢查項目", pl.FIELD_MAX), ("bldg", "棟別", pl.FIELD_MAX),
+                                               ("design", "設計/標準值", pl.MAX_TEXT), ("measured", "實測值", pl.MAX_TEXT)]:
+                            try:
+                                pl.check_len(n[k] if isinstance(n[k], str) else "\n".join(n[k]), job.limit(f"e{i}{k}", base), f"第 {i + 1} 筆的{label}")
+                            except pl.PipelineError as err:
+                                bad.append(str(err))
+                        new.append(n)
+                    if bad:
+                        job.go2 = False
+                        S.re_msg = "；".join(bad); st.rerun()
+                    job.go2 = False                               # 從這裡到做完不讀寫 session_state（不會被第二下按鈕中斷）
+                    for e, n in zip(ents, new):
+                        e.update(n)
+                    guard(job.save_entries, ents)
+                    guard(job.build)
+                    guard(job.check_output)
+                    guard(job.preflight_deliver)
+                    job.pdf = None
+                    st.rerun()
         with st.expander("其他下載與檢查紀錄"):
             st.download_button("下載 交檔檢查紀錄.txt", job.check_report().encode("utf-8"), file_name="交檔檢查紀錄.txt", mime="text/plain")
             if st.button("產生 PDF 預覽"):
@@ -465,7 +516,12 @@ def page():
                 show_result(r)
         st.caption("下次接續：在第 1 步上傳這次的材料自主檢查照片.xlsx，照片與原文會帶回來；用「修改欄位」改過的內容、確認頁的檢查項目（讀圖建議）與選的材料表品項不會帶回，舊照片會回到讀字的內容。")
         if st.button("結束並刪除暫存，處理下一批"):
+            guard(job.wait_idle)
             reset(); st.rerun()
+    if job and S.job is job:                              # 這一輪畫面畫完時別輪正在產出或剛做完（連按兩下）：等它做完，照結果重畫
+        guard(job.wait_idle)
+        if job.gen != gen0:
+            st.rerun()
 
 
 try:

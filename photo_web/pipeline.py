@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import sys
 import tempfile
 import time
@@ -45,6 +46,7 @@ Q_MARK = "〔?〕"
 MISMATCH_RATIO = 0.5                 # 固定欄位與確認值的相似度低於這個數：當成可能是別的工程，要使用者逐張決定
 SUFFIXES = ("聯合建築師事務所", "建築師事務所", "營造股份有限公司", "營造有限公司", "營造廠", "股份有限公司", "有限公司", "工程")   # 比對前去掉的常見後綴（長的在前）
 CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029￾￿]")   # 貼上的文字可能帶控制字元，Excel 不收
+FIELD_MAX = rd.FIELD_MAX              # 單行欄位（工程資料、建議項目、修改欄位的單行格）字數上限
 MAX_TEXT = 4000                      # 確認頁每張文字上限（Excel 一格上限 32767 字，留餘裕）
 CELL_MAX = 30000                     # 寫檔前的最後一道：Excel 一格上限 32767 字
 
@@ -91,6 +93,12 @@ def check_q_total(texts, labels=None) -> None:
         if top + blank > 999:
             raise PipelineError(f"第 {i} 張待確認的〔?〕太多：最大編號 {top} 加上沒編號的 {blank} 個會超過 999（產出時自動編號最多 3 位數）。"
                                 "請把大的編號改成〔?〕，或減少這一張〔?〕的數量。")
+
+
+def check_len(s: str, limit: int, where: str) -> None:
+    """欄位字數上限（以字數算，罕用字與表情符號算 1 個字）：超過就擋下並說明，不靜默截斷。"""
+    if len(s) > limit:
+        raise PipelineError(f"{where}太長：上限 {limit} 字，目前 {len(s)} 字，請縮短後再按一次。")
 
 
 def check_name_len(name: str) -> None:
@@ -422,6 +430,77 @@ class Job:
             raise PipelineError(msg, res)
         return res
 
+    # ---------- 輸入框上限、同一個工作一次只跑一輪 ----------
+    def limit(self, key: str, base: int, *vals: str) -> int:
+        """這個輸入框的字數上限：這一批第一次看到時定下（預設上限與當時內容長度取大），之後不跟目前輸入的值變。
+        （Streamlit 一換 max_chars 就把輸入框重置成空白；稽核 v3 第 11 輪必修 2。）"""
+        caps = self.__dict__.setdefault("caps", {})
+        return caps.setdefault(key, max([base] + [len(v) for v in vals]))
+
+    @property
+    def lock(self) -> "threading.Lock":
+        return self.__dict__.setdefault("_lock", threading.Lock())
+
+    def working(self, wait: float = 900):
+        """產出這一段一次只跑一輪（連按兩下時瀏覽器會讓兩輪同時跑；稽核 v3 第 11 輪必修 1）。
+        拿得到鎖給 True；前一輪還在跑就等它做完再給 False（呼叫端不要重做，重新整理頁面即可）。"""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _cm():
+            mine = self.lock.acquire(blocking=False)
+            if not mine and not self.lock.acquire(timeout=wait):
+                raise PipelineError("前一次產出還沒結束，請稍後再按一次。")
+            try:
+                yield mine
+            finally:
+                self.__dict__["gen"] = self.gen + 1           # 做完一輪：別輪畫到一半的頁面據此重畫
+                self.lock.release()
+        return _cm()
+
+    @property
+    def gen(self) -> int:
+        return self.__dict__.get("gen", 0)
+
+    def produce(self, inputs: dict[str, tuple], fx: dict[str, str]) -> tuple:
+        """確認頁按「產出 Excel」之後的整段流程。inputs＝{nnn:（照片文字, 確認過的建議項目, 材料表品項編號或 -1, 實測值是否同材料表）}。
+        回傳 ("done", entries) 或 ("review", 要顯示在確認頁的原因)。不碰畫面狀態，呼叫端可以整段不被中斷地跑完。"""
+        try:
+            for nnn, (text, sug, form, same) in inputs.items():
+                self.confirmed_sug[nnn] = sug                 # 按產出當下記在工作上：部分寫入失敗後重試不會掉（稽核 v3 第 4 輪）
+                if form >= 0:
+                    self.chosen_forms[nnn] = (form, same)
+                else:
+                    self.chosen_forms.pop(nnn, None)
+                self.write_text(nnn, text, self.fixed_for(nnn, fx))
+            if inputs:
+                res = self.addmany()
+                left = self.stopped()
+                if left:                                      # 還有寫不進去的：說明原因，留在確認頁改
+                    why = [ln for ln in res.stdout.splitlines() if ln.startswith("未寫入：")]
+                    return ("review", f"有 {len(left)} 張沒有寫入，請照說明修改後再按一次「產出 Excel」：\n\n"
+                            + "\n".join(f"- {sanitize(nth(w), self.dir)}" for w in why))
+        except PipelineError as e:
+            return ("review", str(e))
+        try:                                                  # 文字已寫入：這之後失敗就改不了，訊息要明講怎麼做
+            if self.pending_base():
+                self.confirm_base(["--all"])                  # 使用者已在確認頁確認工程資料
+            entries = self.apply_forms(self.apply_suggestions(self.make_entries(), self.confirmed_sug), self.chosen_forms)
+            self.save_entries(entries)
+            self.build()
+            self.check_output()
+            self.preflight_deliver()
+        except PipelineError as e:
+            return ("review", str(e) + ("" if STUCK in str(e) else " " + STUCK))
+        self.pdf = None
+        return ("done", entries)
+
+    def wait_idle(self, wait: float = 900) -> None:
+        """有一輪產出正在跑時等它做完（畫面不讀寫到一半的檔案）。"""
+        if self.lock.locked():
+            with self.working(wait):
+                pass
+
     # ---------- 每日用量：預扣記在工作資料夾，工作階段消失也退得回來 ----------
     def processing(self):
         """收件到讀圖完成這一段握著鎖；recover() 看到鎖就不動這個工作。"""
@@ -661,6 +740,17 @@ class Job:
                 raise PipelineError(f"檔名「{shown}」含有看不見的控制字元、換行或定位字元，請改檔名後重新上傳（zip 裡的檔名也算）。")
             check_x(name, f"檔名「{shown}」")
 
+    def drop_if_idle(self, nnn: str, pending: bool = False) -> bool:
+        """「不放這一張」：已按下產出（pending）或產出正在跑時不動工作清單，回 False（呼叫端當場告知）；否則握著鎖拿掉。
+        （按鈕的回呼會和產出同時執行；稽核 v3 第 12 輪必修 1。）"""
+        if pending or not self.lock.acquire(blocking=False):
+            return False
+        try:
+            self.drop(nnn)
+            return True
+        finally:
+            self.lock.release()
+
     def drop(self, nnn: str) -> None:
         """使用者選「不放這一張」：從待寫入清單拿掉（還沒寫入的才可以）。照片檔留在暫存、隨工作一起刪，編號不重用。"""
         rows = self.manifest()
@@ -727,7 +817,7 @@ class Job:
                 got = self.reads.get(row.get("sha256", ""))
                 sug = got.suggest_item if got else ""
             else:
-                sug = flat(CTRL.sub("", confirmed.get(row.get("nnn", ""), "")))[:200]
+                sug = flat(CTRL.sub("", confirmed.get(row.get("nnn", ""), "")))   # 不截斷：字數上限在確認頁按產出時檢查並說明
             if (not e["item"] or e["item"].startswith(("—", "UNKNOWN"))) and sug:
                 e["item"] = sug
             elif e["item"].startswith(("—", "UNKNOWN")):
